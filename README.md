@@ -53,6 +53,7 @@ make -j $(nproc)
 
 ### Using Docker
 
+```bash
 # Build Docker image
 docker build -t safeld .
 # Run with Docker
