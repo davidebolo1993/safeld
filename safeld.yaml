@@ -1,0 +1,51 @@
+name: safeld_conda_environment
+
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+
+dependencies:
+  # Core C++ development
+  - gcc_linux-64>=11
+  - gxx_linux-64>=11
+  - gfortran_linux-64>=11
+  - cmake>=3.15
+  - make
+  - pkg-config
+
+  # Linear algebra libraries (BLAS/LAPACK)
+  - openblas
+  - libblas=*=*openblas
+  - liblapack=*=*openblas
+  - libcblas=*=*openblas
+  - liblapacke=*=*openblas
+  - blas=*=openblas
+
+  # Compression libraries
+  - zlib
+  - libzlib
+  - zstd
+  - zstandard
+  
+  # XZ/LZMA compression (required for htslib)
+  - xz
+  - liblzma
+  - liblzma-devel
+
+  # HTSlib for VCF processing
+  - htslib
+
+  # Threading and parallel processing
+  - libgomp
+  - openmp
+
+  # Additional libraries
+  - libstdcxx-ng
+  - libgcc-ng
+  - binutils_linux-64
+
+  # Python utilities
+  - python>=3.8
+  - pip
+

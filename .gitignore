@@ -1,0 +1,49 @@
+# Build directories
+build/
+cmake-build-*/
+
+# Compiled binaries
+safeld
+*.exe
+
+# Object files
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+
+# CMake cache
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test data and results
+*.vcf
+*.vcf.gz
+*.vcf.bgz
+test_*
+results_*
+
+# Conda environment
+.conda/
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
