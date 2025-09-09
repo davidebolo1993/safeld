@@ -102,7 +102,7 @@ SAFELD implements a sophisticated simulation algorithm:
 
 ## Performance
 
-Benchmarks on chromosome 22 data (subset of UKBiobank genotype data):
+Benchmarks on chromosome 21 data (subset of UKBiobank genotype data):
 - **Input**: 134,987 variants, 4,783 samples
 - **After filtering**: 134,987 variants, 4,783 samples
 - **Processing time**: 17m 11s   
