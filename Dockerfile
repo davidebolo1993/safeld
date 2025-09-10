@@ -14,7 +14,7 @@ RUN mamba env create -f safeld.yaml && \
     mamba clean -afy
 
 # Make RUN commands use the new environment
-SHELL ["mamba", "run", "-n", "genetic_simulator", "/bin/bash", "-c"]
+SHELL ["mamba", "run", "-n", "safeld_conda_environment", "/bin/bash", "-c"]
 
 # Copy source code
 COPY CMakeLists.txt .
