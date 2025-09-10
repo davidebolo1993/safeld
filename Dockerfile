@@ -1,6 +1,3 @@
-# =============================================================================
-# Build Stage: Compile the application in a full Conda environment
-# =============================================================================
 FROM condaforge/mambaforge:latest as builder
 
 # Set the working directory
@@ -18,14 +15,11 @@ SHELL ["mamba", "run", "-n", "safeld_conda_environment", "/bin/bash", "-c"]
 COPY CMakeLists.txt .
 COPY src/ ./src/
 
-# Build the application using your original CMakeLists.txt
+# Build the application 
 RUN mkdir build && cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release .. && \
     make -j$(nproc)
 
-# =============================================================================
-# Final Stage: Create a minimal, portable image
-# =============================================================================
 FROM ubuntu:22.04 as final
 
 LABEL maintainer="davide.bolognini@fht.org"
@@ -34,9 +28,6 @@ LABEL description="A portable container for the safeld application."
 
 # Copy the compiled executable from the build stage
 COPY --from=builder /app/build/safeld /usr/local/bin/safeld
-
-# --- Copy required shared libraries ---
-# Libraries from the Conda environment
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libhts.so.3 /usr/local/lib/
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libopenblas.so.0 /usr/local/lib/
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libz.so.1 /usr/local/lib/
@@ -49,8 +40,6 @@ COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libgfortran.so.
 
 # Library from the base system of the builder
 COPY --from=builder /lib/x86_64-linux-gnu/libbz2.so.1 /usr/local/lib/
-
-# --- FIX: Add the missing Quad Math library required by libgfortran ---
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libquadmath.so.0 /usr/local/lib/
 
 # Update the system's dynamic linker cache to find the newly copied libraries
