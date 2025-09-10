@@ -51,13 +51,23 @@ cmake ..
 make -j $(nproc)
 ```
 
-### Using Docker
+### Using Docker ...
 
 ```bash
 # Build Docker image
 docker build -t safeld .
 # Run with Docker
 docker run --rm -v $(pwd):/data safeld -vcf /data/input.vcf.gz -out /data/output.vcf.gz -compress
+```
+
+### ... or Singularity
+
+A pre-compiled docker image is available [here](https://hub.docker.com/repository/docker/davidebolo1993/safeld). This can be pulled into a singularity image with:
+
+```bash
+# Pull Singularity image
+singularity pull --dir . docker://davidebolo1993/safeld:latest
+singularity exec -B "/data,$PWD" safeld_latest.sif safeld -vcf /data/input.vcf.gz -out output.vcf.gz -compress
 ```
 
 ## Usage
