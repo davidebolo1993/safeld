@@ -29,7 +29,7 @@ LABEL description="A portable container for the safeld application."
 # Copy the compiled executable from the build stage
 COPY --from=builder /app/build/build/safeld /usr/local/bin/safeld
 
-# Copy required shared libraries from the builder's Conda environment ---
+# Copy required shared libraries from the builder's Conda environment
 COPY --from=builder /home/mambauser/.conda/envs/safeld_conda_environment/lib/libhts.so.3 /usr/local/lib/
 COPY --from=builder /home/mambauser/.conda/envs/safeld_conda_environment/lib/libopenblas.so.0 /usr/local/lib/
 COPY --from=builder /home/mambauser/.conda/envs/safeld_conda_environment/lib/libz.so.1 /usr/local/lib/
