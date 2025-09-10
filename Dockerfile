@@ -1,4 +1,4 @@
-FROM mambaforge/mambaforge:latest as builder
+FROM condaforge/mambaforge:latest as builder
 
 # Set the working directory
 WORKDIR /app

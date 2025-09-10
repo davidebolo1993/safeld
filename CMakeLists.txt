@@ -71,4 +71,3 @@ message(STATUS "=== Build Configuration ===")
 message(STATUS "HTSlib found: ${HTSLIB_FOUND}")
 message(STATUS "HTSlib version: ${HTSLIB_VERSION}")
 message(STATUS "============================")
-
