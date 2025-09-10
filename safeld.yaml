@@ -27,6 +27,7 @@ dependencies:
   - libzlib
   - zstd
   - zstandard
+  - bzip2
   
   # XZ/LZMA compression (required for htslib)
   - xz
