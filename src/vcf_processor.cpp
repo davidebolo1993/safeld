@@ -4,7 +4,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cstring>
-#include <cmath>          // <- ADD THIS LINE
+#include <cmath>
 
 
 VCFProcessor::VCFProcessor(const std::string& vcf_file, double maf_filter)
