@@ -1,7 +1,7 @@
 # =============================================================================
 # Build Stage: Compile the application in a full Conda environment
 # =============================================================================
-FROM condaforge/mambaforge:latest as builder
+FROM mambaforge/mambaforge:latest as builder
 
 # Set the working directory
 WORKDIR /app
@@ -32,20 +32,22 @@ LABEL maintainer="davide.bolognini@fht.org"
 LABEL version="0.0.1"
 LABEL description="A portable container for the safeld application."
 
-# --- FIX: Correct path to the compiled executable ---
+# Copy the compiled executable from the build stage
 COPY --from=builder /app/build/safeld /usr/local/bin/safeld
 
-# --- FIX: Correct path to the Conda environment's libraries ---
-# The environment inside the mambaforge container is at /opt/conda/envs/
+# --- Copy required shared libraries ---
+# Most libraries are in the Conda env
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libhts.so.3 /usr/local/lib/
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libopenblas.so.0 /usr/local/lib/
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libz.so.1 /usr/local/lib/
-COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libbz2.so.1 /usr/local/lib/
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/liblzma.so.5 /usr/local/lib/
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libdeflate.so.0 /usr/local/lib/
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libgomp.so.1 /usr/local/lib/
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libstdc++.so.6 /usr/local/lib/
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libgcc_s.so.1 /usr/local/lib/
+
+# --- FIX: libbz2 is in a system path, not the Conda path ---
+COPY --from=builder /lib/x86_64-linux-gnu/libbz2.so.1 /usr/local/lib/
 
 # Update the system's dynamic linker cache to find the newly copied libraries
 RUN ldconfig
