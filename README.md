@@ -67,6 +67,7 @@ A pre-compiled docker image is available [here](https://hub.docker.com/repositor
 ```bash
 # Pull Singularity image
 singularity pull --dir . docker://davidebolo1993/safeld:latest
+# Run with Singularity
 singularity exec -B "/data,$PWD" safeld_latest.sif safeld -vcf /data/input.vcf.gz -out output.vcf.gz -compress
 ```
 
