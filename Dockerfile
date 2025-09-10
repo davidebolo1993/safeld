@@ -36,7 +36,7 @@ LABEL description="A portable container for the safeld application."
 COPY --from=builder /app/build/safeld /usr/local/bin/safeld
 
 # --- Copy required shared libraries ---
-# Most libraries are in the Conda env
+# Libraries from the Conda environment
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libhts.so.3 /usr/local/lib/
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libopenblas.so.0 /usr/local/lib/
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libz.so.1 /usr/local/lib/
@@ -46,8 +46,11 @@ COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libgomp.so.1 /u
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libstdc++.so.6 /usr/local/lib/
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libgcc_s.so.1 /usr/local/lib/
 
-# --- FIX: libbz2 is in a system path, not the Conda path ---
+# Library from the base system of the builder
 COPY --from=builder /lib/x86_64-linux-gnu/libbz2.so.1 /usr/local/lib/
+
+# --- FIX: Add the missing Fortran runtime library required by OpenBLAS ---
+COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libgfortran.so.5 /usr/local/lib/
 
 # Update the system's dynamic linker cache to find the newly copied libraries
 RUN ldconfig
