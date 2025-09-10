@@ -45,12 +45,13 @@ COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libdeflate.so.0
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libgomp.so.1 /usr/local/lib/
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libstdc++.so.6 /usr/local/lib/
 COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libgcc_s.so.1 /usr/local/lib/
+COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libgfortran.so.5 /usr/local/lib/
 
 # Library from the base system of the builder
 COPY --from=builder /lib/x86_64-linux-gnu/libbz2.so.1 /usr/local/lib/
 
-# --- FIX: Add the missing Fortran runtime library required by OpenBLAS ---
-COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libgfortran.so.5 /usr/local/lib/
+# --- FIX: Add the missing Quad Math library required by libgfortran ---
+COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libquadmath.so.0 /usr/local/lib/
 
 # Update the system's dynamic linker cache to find the newly copied libraries
 RUN ldconfig
