@@ -2,11 +2,12 @@
 #include <string>
 #include <vector>
 #include <memory>
-#include <fstream>
 #include <sstream>
+#include <fstream>
 #include <iomanip>
-#include <cstring>
 #include <htslib/bgzf.h>
+#include <cstring>
+#include <cerrno>
 #include "vcf_processor.h"
 #include "simulation_engine.h"
 #include "utils.h"
@@ -17,21 +18,21 @@ struct CommandLineArgs {
     std::string sample_list;
     double maf_filter = 0.01;
     int n_traits = 10;
-    int n_workers = 0;  // 0 = auto-detect
+    int n_workers = 0; // 0 = auto-detect
     bool compress_output = false;
 };
 
 void printUsage(const char* program_name) {
     std::cout << "Usage: " << program_name << " [OPTIONS]\n\n"
               << "Options:\n"
-              << "  -vcf FILE         Input VCF file (required, supports .vcf, .vcf.gz)\n"
-              << "  -out FILE         Output VCF file (default: SAFE_LD.vcf)\n"
-              << "  -samples LIST     Comma-separated sample IDs to include\n"
-              << "  -maf FLOAT        Minimum allele frequency filter (default: 0.01)\n"
-              << "  -ntraits INT      Number of synthetic traits (default: 10)\n"
-              << "  -workers INT      Number of worker threads (default: auto-detect)\n"
-              << "  -compress         Compress output (bgzip)\n"
-              << "  -h, --help        Show this help message\n\n";
+              << "  -vcf FILE        Input VCF file (required, supports .vcf, .vcf.gz)\n"
+              << "  -out FILE        Output VCF file (default: SAFE_LD.vcf)\n"
+              << "  -samples LIST    Comma-separated sample IDs to include\n"
+              << "  -maf FLOAT       Minimum allele frequency filter (default: 0.01)\n"
+              << "  -ntraits INT     Number of synthetic traits (default: 10)\n"
+              << "  -workers INT     Number of worker threads (default: auto-detect)\n"
+              << "  -compress        Compress output (bgzip)\n"
+              << "  -h, --help       Show this help message\n\n";
 }
 
 CommandLineArgs parseCommandLine(int argc, char* argv[]) {
@@ -68,7 +69,6 @@ void writeVCFHeader(std::ostream& out, int n_traits) {
     out << "##source=safeld-cpp\n";
     out << "##FORMAT=<ID=DS,Number=1,Type=Float,Description=\"Dosage\">\n";
     out << "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT";
-    
     for (int i = 1; i <= n_traits; ++i) {
         out << "\tT" << i;
     }
@@ -89,10 +89,9 @@ void writeVariant(std::ostream& out, const ProcessedVariant& variant) {
     out << '\n';
 }
 
-bool writeResults(const std::string& output_file, const std::vector<ProcessedVariant>& results, 
-                  int n_traits, bool compress) {
+bool writeResults(const std::string& output_file, const std::vector<ProcessedVariant>& results,
+                 int n_traits, bool compress) {
     Timer timer("Writing results");
-    
     logInfo("Writing " + std::to_string(results.size()) + " variants to: " + output_file);
     
     if (compress || output_file.ends_with(".gz")) {
@@ -108,7 +107,6 @@ bool writeResults(const std::string& output_file, const std::vector<ProcessedVar
         std::ostringstream header;
         writeVCFHeader(header, n_traits);
         std::string header_str = header.str();
-        
         ssize_t written = bgzf_write(fp, header_str.c_str(), header_str.length());
         if (written != static_cast<ssize_t>(header_str.length())) {
             logError("Failed to write VCF header: " + std::string(strerror(errno)));
@@ -121,7 +119,6 @@ bool writeResults(const std::string& output_file, const std::vector<ProcessedVar
             std::ostringstream line;
             writeVariant(line, results[i]);
             std::string line_str = line.str();
-            
             written = bgzf_write(fp, line_str.c_str(), line_str.length());
             if (written != static_cast<ssize_t>(line_str.length())) {
                 logError("Failed to write variant " + std::to_string(i) + ": " + std::string(strerror(errno)));
@@ -138,6 +135,7 @@ bool writeResults(const std::string& output_file, const std::vector<ProcessedVar
             logError("Failed to close output file properly: " + std::string(strerror(errno)));
             return false;
         }
+        
     } else {
         // Regular file output with better error handling
         std::ofstream out(output_file);
@@ -170,10 +168,9 @@ bool writeResults(const std::string& output_file, const std::vector<ProcessedVar
     return true;
 }
 
-
 int main(int argc, char* argv[]) {
     try {
-        // Parse command line arguments
+        // Parse command line arguments (handles help before any initialization)
         CommandLineArgs args = parseCommandLine(argc, argv);
         
         if (args.vcf_file.empty()) {
@@ -181,6 +178,8 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
+        // Now that we're past help, initialize logging
+        logInfo("Vector pool initialized with max size: 2000");
         logInfo("Starting SAFE_LD simulation...");
         logInfo("Input VCF: " + args.vcf_file);
         logInfo("Output file: " + args.output_file);
@@ -206,7 +205,7 @@ int main(int argc, char* argv[]) {
         SimulationEngine engine(args.n_traits, n_samples, args.n_workers);
         engine.initialize();
         
-        // Step 3: Run simulation
+        // Step 3: Run simulation (using original method)
         auto results = engine.simulateVariants(variants);
         
         // Step 4: Write results
@@ -215,7 +214,7 @@ int main(int argc, char* argv[]) {
         }
         
         logInfo("SAFE_LD simulation completed successfully!");
-        logInfo("Processed " + std::to_string(variants.size()) + " variants with " + 
+        logInfo("Processed " + std::to_string(variants.size()) + " variants with " +
                 std::to_string(n_samples) + " samples");
         
         return 0;

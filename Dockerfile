@@ -61,6 +61,7 @@ WORKDIR /data
 
 # Make the binary executable
 RUN chmod +x /usr/local/bin/safeld
+RUN chmod +x /usr/local/bin/safeld_chunked
 
 # Set the entrypoint to run the tool by default
 ENTRYPOINT ["safeld"]

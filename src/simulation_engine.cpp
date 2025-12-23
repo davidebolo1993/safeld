@@ -83,7 +83,7 @@ void SimulationEngine::initialize() {
     logInfo("Started " + std::to_string(n_workers_) + " worker threads");
 }
 
-ProcessedVariant SimulationEngine::processVariant(const VariantRecord& variant, size_t index) {
+ProcessedVariant SimulationEngine::processVariant(const Variant& variant, size_t index) {
     // Standardize dosages
     auto standardized = standardize(variant.dosages);
 
@@ -110,7 +110,7 @@ ProcessedVariant SimulationEngine::processVariant(const VariantRecord& variant, 
 }
 
 std::vector<ProcessedVariant> SimulationEngine::simulateVariants(
-    const std::vector<std::unique_ptr<VariantRecord>>& variants) {
+    const std::vector<std::unique_ptr<Variant>>& variants) {
     Timer timer("Variant simulation");
     logInfo("Starting simulation of " + std::to_string(variants.size()) + " variants using " + std::to_string(n_workers_) + " threads");
 

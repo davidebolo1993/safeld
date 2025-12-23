@@ -35,7 +35,7 @@ private:
     
     void initializeTraitsMatrix();
     void workerThread();
-    ProcessedVariant processVariant(const VariantRecord& variant, size_t index);
+    ProcessedVariant processVariant(const Variant& variant, size_t index);
     
 public:
     SimulationEngine(int n_traits, int n_samples, int n_workers = 0);
@@ -43,7 +43,7 @@ public:
     
     void initialize();
     std::vector<ProcessedVariant> simulateVariants(
-        const std::vector<std::unique_ptr<VariantRecord>>& variants);
+        const std::vector<std::unique_ptr<Variant>>& variants);
     
     // Getters
     int getNumTraits() const { return n_traits_; }
