@@ -20,6 +20,8 @@ private:
     TraitsMetadata traits_meta_;
     std::vector<std::vector<double>> traits_matrix_;  // Full or tiled loading
     
+    static constexpr int TRAIT_BATCH_SIZE = 2000;  // Process 2000 traits at a time
+
     void loadTraitsMetadata();
     void loadTraitsMatrix();
     void loadTraitsTile(int tile_id, int start_trait, int n_traits);
@@ -29,11 +31,10 @@ private:
     
     void simulateChunk(int chunk_id);
     void writeChunkVCF(int chunk_id, const ChunkMetadata& meta,
-                      const std::vector<std::vector<double>>& synthetic_dosages);
+                       const std::vector<std::vector<double>>& synthetic_dosages);
 
 public:
     ChunkedSimulator(const SimulationConfig& config);
-    
     void run();
 };
 
