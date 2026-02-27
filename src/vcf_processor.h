@@ -47,10 +47,7 @@ public:
 
     bool initialize(const std::string& sample_list = "");
 
-    // OLD: Loads entire VCF into memory (kept for backward compatibility)
-    std::vector<std::unique_ptr<Variant>> processVariants();
-
-    // NEW: Streaming callback-based processing
+    // Streaming callback-based processing.
     using VariantCallback = std::function<void(std::unique_ptr<Variant>)>;
     void streamVariants(VariantCallback callback);
 

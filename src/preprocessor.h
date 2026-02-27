@@ -44,7 +44,7 @@ private:
     void generateAndSaveTraits();
     void processAndChunkVCF();
     
-    void saveTraitsTiled(const std::vector<std::vector<double>>& traits_matrix);
+    void saveTraitsTiled();
     void saveTraitsMetadata(const TraitsMetadata& meta);
     
     void saveChunk(int chunk_id, const std::vector<std::vector<double>>& genotypes,
@@ -58,4 +58,3 @@ public:
     
     void run();
 };
-

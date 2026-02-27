@@ -4,7 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
-#include <thread>
+#include <algorithm>
 #include <htslib/bgzf.h>
 #include <sys/stat.h>
 #include <cerrno>
@@ -19,6 +19,7 @@ ChunkedSimulator::ChunkedSimulator(const SimulationConfig& config)
 
 void ChunkedSimulator::loadTraitsMetadata() {
     Timer timer("Loading traits metadata");
+    traits_meta_ = TraitsMetadata{};
     std::string meta_file = config_.preprocessed_dir + "/traits/metadata.txt";
     std::ifstream in(meta_file);
     if (!in) {
@@ -45,25 +46,27 @@ void ChunkedSimulator::loadTraitsMetadata() {
             }
         }
     }
+
+    if (traits_meta_.n_tiles <= 0 || traits_meta_.n_traits <= 0 || traits_meta_.n_samples <= 0) {
+        throw std::runtime_error("Invalid traits metadata values in: " + meta_file);
+    }
+    if (traits_meta_.tile_trait_counts.size() != static_cast<size_t>(traits_meta_.n_tiles)) {
+        throw std::runtime_error("Trait metadata mismatch: tile count does not match n_tiles");
+    }
+    int total_tile_traits = 0;
+    for (int count : traits_meta_.tile_trait_counts) {
+        total_tile_traits += count;
+    }
+    if (total_tile_traits != traits_meta_.n_traits) {
+        throw std::runtime_error("Trait metadata mismatch: sum(tile_trait_counts) != n_traits");
+    }
+
     logInfo("Traits metadata: " + std::to_string(traits_meta_.n_traits) + " traits, " +
             std::to_string(traits_meta_.n_samples) + " samples, " +
             std::to_string(traits_meta_.n_tiles) + " tiles");
 }
 
-void ChunkedSimulator::loadTraitsMatrix() {
-    Timer timer("Loading traits matrix");
-    traits_matrix_.resize(traits_meta_.n_traits);
-    int current_trait = 0;
-    for (int tile_id = 0; tile_id < traits_meta_.n_tiles; ++tile_id) {
-        int traits_in_tile = traits_meta_.tile_trait_counts[tile_id];
-        loadTraitsTile(tile_id, current_trait, traits_in_tile);
-        current_trait += traits_in_tile;
-        logInfo("Loaded tile " + std::to_string(tile_id + 1) + "/" +
-                std::to_string(traits_meta_.n_tiles));
-    }
-}
-
-void ChunkedSimulator::loadTraitsTile(int tile_id, int start_trait, int n_traits) {
+std::vector<double> ChunkedSimulator::loadTraitsTileData(int tile_id, int n_traits) {
     std::string tile_file = config_.preprocessed_dir + "/traits/W_tile_" +
                             std::to_string(tile_id) + ".bin";
     std::ifstream in(tile_file, std::ios::binary);
@@ -71,11 +74,17 @@ void ChunkedSimulator::loadTraitsTile(int tile_id, int start_trait, int n_traits
         throw std::runtime_error("Failed to open trait tile: " + tile_file);
     }
 
-    for (int t = 0; t < n_traits; ++t) {
-        traits_matrix_[start_trait + t].resize(traits_meta_.n_samples);
-        in.read(reinterpret_cast<char*>(traits_matrix_[start_trait + t].data()),
-                traits_meta_.n_samples * sizeof(double));
+    std::vector<double> tile_data(static_cast<size_t>(n_traits) * traits_meta_.n_samples);
+    if (!tile_data.empty()) {
+        in.read(reinterpret_cast<char*>(tile_data.data()),
+                static_cast<std::streamsize>(tile_data.size() * sizeof(double)));
     }
+
+    if (!in) {
+        throw std::runtime_error("Failed while reading trait tile: " + tile_file);
+    }
+
+    return tile_data;
 }
 
 ChunkMetadata ChunkedSimulator::loadChunkMetadata(int chunk_id) {
@@ -166,52 +175,48 @@ void ChunkedSimulator::simulateChunk(int chunk_id) {
         logInfo("  Allocating result matrix...");
         std::vector<double> Y_flat(vbatch_size * traits_meta_.n_traits, 0.0);
 
-        // Process traits in batches
+        // Process traits tile-by-tile to avoid loading the full trait matrix.
         logInfo("  Starting GEMM computation...");
         Timer gemm_timer("BLAS GEMM for variant batch " + std::to_string(vbatch + 1));
-        int num_trait_batches = (traits_meta_.n_traits + TRAIT_BATCH_SIZE - 1) / TRAIT_BATCH_SIZE;
-        
-        for (int tbatch = 0; tbatch < num_trait_batches; ++tbatch) {
-            int tbatch_start = tbatch * TRAIT_BATCH_SIZE;
-            int tbatch_size = std::min(TRAIT_BATCH_SIZE, traits_meta_.n_traits - tbatch_start);
-            
-            logInfo("    Processing trait batch " + std::to_string(tbatch + 1) + "/" + 
-                    std::to_string(num_trait_batches) + " (" + std::to_string(tbatch_size) + " traits)");
-            
-            // Flatten this batch of traits: W_batch is tbatch_size x S (row-major)
-            std::vector<double> W_batch(tbatch_size * traits_meta_.n_samples);
-            for (int t = 0; t < tbatch_size; ++t) {
-                std::copy(traits_matrix_[tbatch_start + t].begin(), 
-                         traits_matrix_[tbatch_start + t].end(),
-                         W_batch.begin() + t * traits_meta_.n_samples);
+
+        int global_trait_start = 0;
+        for (int tile_id = 0; tile_id < traits_meta_.n_tiles; ++tile_id) {
+            int traits_in_tile = traits_meta_.tile_trait_counts[tile_id];
+            auto tile_data = loadTraitsTileData(tile_id, traits_in_tile);
+            logInfo("    Loaded trait tile " + std::to_string(tile_id + 1) + "/" +
+                    std::to_string(traits_meta_.n_tiles) + " (" +
+                    std::to_string(traits_in_tile) + " traits)");
+
+            int num_trait_batches = (traits_in_tile + TRAIT_BATCH_SIZE - 1) / TRAIT_BATCH_SIZE;
+            for (int tbatch = 0; tbatch < num_trait_batches; ++tbatch) {
+                int local_start = tbatch * TRAIT_BATCH_SIZE;
+                int tbatch_size = std::min(TRAIT_BATCH_SIZE, traits_in_tile - local_start);
+
+                const double* w_ptr = tile_data.data() +
+                    static_cast<size_t>(local_start) * traits_meta_.n_samples;
+                double* y_ptr = Y_flat.data() + global_trait_start + local_start;
+
+                cblas_dgemm(CblasRowMajor,
+                            CblasNoTrans,
+                            CblasTrans,
+                            vbatch_size,
+                            tbatch_size,
+                            traits_meta_.n_samples,
+                            1.0 / traits_meta_.n_samples,
+                            G_flat.data(),
+                            traits_meta_.n_samples,
+                            w_ptr,
+                            traits_meta_.n_samples,
+                            0.0,
+                            y_ptr,
+                            traits_meta_.n_traits);
             }
-            
-            // Allocate result for this batch: Y_batch is V_batch x tbatch_size (row-major)
-            std::vector<double> Y_batch(vbatch_size * tbatch_size);
-            
-            // Compute Y_batch = G * W_batch^T
-            cblas_dgemm(CblasRowMajor,
-                        CblasNoTrans,
-                        CblasTrans,
-                        vbatch_size,
-                        tbatch_size,
-                        traits_meta_.n_samples,
-                        1.0 / traits_meta_.n_samples,
-                        G_flat.data(),
-                        traits_meta_.n_samples,
-                        W_batch.data(),
-                        traits_meta_.n_samples,
-                        0.0,
-                        Y_batch.data(),
-                        tbatch_size);
-            
-            // Copy results to the appropriate columns of Y_flat
-            for (int v = 0; v < vbatch_size; ++v) {
-                for (int t = 0; t < tbatch_size; ++t) {
-                    Y_flat[v * traits_meta_.n_traits + (tbatch_start + t)] = 
-                        Y_batch[v * tbatch_size + t];
-                }
-            }
+
+            global_trait_start += traits_in_tile;
+        }
+
+        if (global_trait_start != traits_meta_.n_traits) {
+            throw std::runtime_error("Trait tile metadata mismatch during simulation");
         }
         
         logInfo("  GEMM completed for " + std::to_string(vbatch_size) + " variants");
@@ -254,7 +259,7 @@ void ChunkedSimulator::writeChunkVCF(int chunk_id, const ChunkMetadata& meta,
 
         // Write header in smaller pieces
         std::string header = "##fileformat=VCFv4.1\n";
-        header += "##source=safeld-chunked\n";
+        header += "##source=safeld\n";
         header += "##FORMAT=<ID=DS,Number=1,Type=Float,Description=\"Dosage\">\n";
         bgzf_write(fp, header.c_str(), header.length());
         
@@ -302,7 +307,7 @@ void ChunkedSimulator::writeChunkVCF(int chunk_id, const ChunkMetadata& meta,
 
         // Write header
         out << "##fileformat=VCFv4.1\n";
-        out << "##source=safeld-chunked\n";
+        out << "##source=safeld\n";
         out << "##FORMAT=<ID=DS,Number=1,Type=Float,Description=\"Dosage\">\n";
         out << "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT";
         for (int i = 1; i <= traits_meta_.n_traits; i++) {
@@ -333,11 +338,9 @@ void ChunkedSimulator::writeChunkVCF(int chunk_id, const ChunkMetadata& meta,
 void ChunkedSimulator::run() {
     logInfo("Starting chunked simulation...");
     
-    // Load traits once into memory
+    // Load metadata once; trait tiles are streamed on demand.
     loadTraitsMetadata();
-    loadTraitsMatrix();
-    
-    logInfo("Traits matrix loaded - will process in batches during simulation");
+    logInfo("Trait tiles will be streamed on demand during simulation");
 
     // Create output directory
     if (mkdir(config_.output_dir.c_str(), 0755) != 0 && errno != EEXIST) {
@@ -372,4 +375,3 @@ void ChunkedSimulator::run() {
 
     logInfo("Chunked simulation completed!");
 }
-

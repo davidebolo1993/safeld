@@ -6,6 +6,7 @@
 #include <htslib/kstring.h>
 #include <dirent.h>
 #include <cstring>
+#include <climits>
 
 VCFMerger::VCFMerger(const MergerConfig& config) : config_(config) {
 }
@@ -27,8 +28,34 @@ std::vector<std::string> VCFMerger::findChunkFiles() {
     }
     closedir(dir);
     
-    // Sort by chunk number
-    std::sort(files.begin(), files.end());
+    // Sort numerically by chunk id to avoid lexical ordering issues
+    // (e.g., chunk_10 before chunk_2).
+    auto chunkId = [](const std::string& path) {
+        size_t slash = path.find_last_of('/');
+        std::string filename = (slash == std::string::npos) ? path : path.substr(slash + 1);
+        if (filename.rfind("chunk_", 0) != 0) {
+            return INT_MAX;
+        }
+
+        size_t start = std::string("chunk_").size();
+        size_t end = filename.find('.', start);
+        std::string id_str = filename.substr(start, end - start);
+
+        try {
+            return std::stoi(id_str);
+        } catch (...) {
+            return INT_MAX;
+        }
+    };
+
+    std::sort(files.begin(), files.end(), [&](const std::string& a, const std::string& b) {
+        int id_a = chunkId(a);
+        int id_b = chunkId(b);
+        if (id_a != id_b) {
+            return id_a < id_b;
+        }
+        return a < b;
+    });
     
     return files;
 }
@@ -189,4 +216,3 @@ void VCFMerger::run() {
     
     logInfo("VCF merge completed!");
 }
-

@@ -34,17 +34,18 @@ find_package(PkgConfig REQUIRED)
 # Find htslib
 pkg_check_modules(HTSLIB REQUIRED htslib)
 
-# Shared/common source files (used by both executables)
+# Shared/common source files
 set(SHARED_SOURCES
     src/vcf_processor.cpp
-    src/memory_pool.cpp
     src/utils.cpp
 )
 
-# Original safeld executable
+# Main safeld executable (chunked workflow)
 set(SAFELD_SOURCES
     src/main.cpp
-    src/simulation_engine.cpp
+    src/preprocessor.cpp
+    src/chunked_simulator.cpp
+    src/vcf_merger.cpp
     ${SHARED_SOURCES}
 )
 
@@ -61,48 +62,17 @@ target_link_libraries(safeld
     dl
 )
 
-target_include_directories(safeld PRIVATE 
+target_include_directories(safeld PRIVATE
     src/
     ${HTSLIB_INCLUDE_DIRS}
 )
 
 target_compile_options(safeld PRIVATE ${HTSLIB_CFLAGS_OTHER})
 
-# Chunked safeld executable
-set(CHUNKED_SOURCES
-    src/main_chunked.cpp
-    src/preprocessor.cpp
-    src/chunked_simulator.cpp
-    src/vcf_merger.cpp
-    ${SHARED_SOURCES}
-)
-
-add_executable(safeld_chunked ${CHUNKED_SOURCES})
-
-target_link_libraries(safeld_chunked 
-    ${BLAS_LIBRARIES}
-    ${LAPACK_LIBRARIES}
-    ZLIB::ZLIB
-    OpenMP::OpenMP_CXX
-    ${HTSLIB_LIBRARIES}
-    pthread
-    m
-    dl
-)
-
-target_include_directories(safeld_chunked PRIVATE 
-    src/
-    ${HTSLIB_INCLUDE_DIRS}
-)
-
-target_compile_options(safeld_chunked PRIVATE ${HTSLIB_CFLAGS_OTHER})
-
 # Summary
 message(STATUS "=== Build Configuration ===")
 message(STATUS "HTSlib found: ${HTSLIB_FOUND}")
 message(STATUS "HTSlib version: ${HTSLIB_VERSION}")
-message(STATUS "Building two executables:")
-message(STATUS "  - safeld (original)")
-message(STATUS "  - safeld_chunked (new chunked workflow)")
+message(STATUS "Building executable:")
+message(STATUS "  - safeld (three-stage chunked workflow)")
 message(STATUS "============================")
-

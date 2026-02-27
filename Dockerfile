@@ -34,7 +34,6 @@ LABEL description="A portable container for the safeld application."
 
 # Copy the compiled executable from the build stage
 COPY --from=builder /app/build/safeld /usr/local/bin/safeld
-COPY --from=builder /app/build/safeld_chunked /usr/local/bin/safeld_chunked
 
 # --- Copy required shared libraries ---
 # Libraries from the Conda environment
@@ -62,11 +61,9 @@ WORKDIR /data
 
 # Make the binary executable
 RUN chmod +x /usr/local/bin/safeld
-RUN chmod +x /usr/local/bin/safeld_chunked
 
 # Set the entrypoint to run the tool by default
 ENTRYPOINT ["safeld"]
 
 # Default command to run if no other arguments are provided
 CMD ["--help"]
-

@@ -8,6 +8,7 @@
 #include <sys/types.h>
 #include <cerrno>
 #include <cstring>
+#include <algorithm>
 
 Preprocessor::Preprocessor(const PreprocessConfig& config) 
     : config_(config), n_samples_(0) {
@@ -49,25 +50,7 @@ void Preprocessor::generateAndSaveTraits() {
     Timer timer("Traits matrix generation and serialization");
     logInfo("Generating " + std::to_string(config_.n_traits) + " traits for " +
            std::to_string(n_samples_) + " samples");
-
-    std::vector<std::vector<double>> traits_matrix(config_.n_traits);
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::normal_distribution<double> dist(0.0, 1.0);
-
-    for (int i = 0; i < config_.n_traits; ++i) {
-        traits_matrix[i].resize(n_samples_);
-        for (int j = 0; j < n_samples_; ++j) {
-            traits_matrix[i][j] = dist(gen);
-        }
-
-        if ((i + 1) % 1000 == 0) {
-            logInfo("Generated " + std::to_string(i + 1) + "/" + 
-                   std::to_string(config_.n_traits) + " traits");
-        }
-    }
-
-    saveTraitsTiled(traits_matrix);
+    saveTraitsTiled();
 }
 
 int Preprocessor::calculateTraitsPerTile() const {
@@ -92,7 +75,7 @@ int Preprocessor::calculateTraitsPerTile() const {
     return traits_per_tile;
 }
 
-void Preprocessor::saveTraitsTiled(const std::vector<std::vector<double>>& traits_matrix) {
+void Preprocessor::saveTraitsTiled() {
     Timer timer("Saving traits to disk");
 
     // Calculate traits per tile (auto or user-specified)
@@ -111,6 +94,12 @@ void Preprocessor::saveTraitsTiled(const std::vector<std::vector<double>>& trait
     meta.n_samples = n_samples_;
     meta.n_tiles = n_tiles;
 
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::normal_distribution<double> dist(0.0, 1.0);
+    std::vector<double> trait_row(n_samples_);
+    int generated_traits = 0;
+
     for (int tile_id = 0; tile_id < n_tiles; ++tile_id) {
         int start_trait = tile_id * traits_per_tile;
         int end_trait = std::min(start_trait + traits_per_tile, config_.n_traits);
@@ -122,10 +111,23 @@ void Preprocessor::saveTraitsTiled(const std::vector<std::vector<double>>& trait
             throw std::runtime_error("Failed to open trait tile file: " + tile_file);
         }
 
-        // Write traits row by row
-        for (int t = start_trait; t < end_trait; ++t) {
-            out.write(reinterpret_cast<const char*>(traits_matrix[t].data()),
-                     n_samples_ * sizeof(double));
+        // Generate and write one trait row at a time to keep memory bounded.
+        for (int t = 0; t < traits_in_tile; ++t) {
+            for (int j = 0; j < n_samples_; ++j) {
+                trait_row[j] = dist(gen);
+            }
+            out.write(reinterpret_cast<const char*>(trait_row.data()),
+                      static_cast<std::streamsize>(n_samples_ * sizeof(double)));
+
+            generated_traits++;
+            if (generated_traits % 1000 == 0 || generated_traits == config_.n_traits) {
+                logInfo("Generated " + std::to_string(generated_traits) + "/" +
+                        std::to_string(config_.n_traits) + " traits");
+            }
+        }
+
+        if (!out) {
+            throw std::runtime_error("Failed while writing trait tile file: " + tile_file);
         }
 
         meta.tile_trait_counts.push_back(traits_in_tile);
