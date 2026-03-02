@@ -1,6 +1,6 @@
-# SAFELD - SAFE LD Simulator
+# SAFELD
 
-A high-performance C++ implementation of the SAFE LD (Linkage Disequilibrium) simulator for generating synthetic genomic data from VCF files.
+A high-performance C++ implementation of the SAFE-LD (Shrinkage and Anonymization Framework for LD Estimation) method for generating synthetic genomic data from VCF files.
 
 ## Overview
 
@@ -263,8 +263,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Citation
 
-If you use SAFELD in your research, please cite:
-[Citation to be added]
+If you use SAFELD in your research, please cite our [preprint](https://doi.org/10.1101/2025.09.29.679154).
 
 ## Contributing
 
