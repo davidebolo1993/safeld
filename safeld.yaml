@@ -36,6 +36,7 @@ dependencies:
 
   # HTSlib for VCF processing
   - htslib
+  - bcftools
 
   # Threading and parallel processing
   - libgomp

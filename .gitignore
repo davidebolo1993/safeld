@@ -32,6 +32,8 @@ Makefile
 *.vcf.bgz
 test_*
 results_*
+test/
+test/*
 
 # Conda environment
 .conda/
