@@ -35,7 +35,7 @@ void Preprocessor::saveHeaderMetadata(const std::vector<std::string>& contig_nam
     for (const auto& contig : contig_names) {
         out << "##contig=<ID=" << contig << ">\n";
     }
-    logInfo("Saved " + std::to_string(contig_names.size()) + " contig header records");
+    logDebug("Saved " + std::to_string(contig_names.size()) + " contig header records");
 }
 
 void Preprocessor::createOutputDirectories() {
@@ -72,8 +72,8 @@ void Preprocessor::generateAndSaveTraits() {
 int Preprocessor::calculateTraitsPerTile() const {
     if (config_.traits_per_tile > 0) {
         // User-specified value
-        logInfo("Using user-specified traits per tile: " + 
-               std::to_string(config_.traits_per_tile));
+        logDebug("Using user-specified traits per tile: " + 
+                std::to_string(config_.traits_per_tile));
         return config_.traits_per_tile;
     }
 
@@ -85,8 +85,8 @@ int Preprocessor::calculateTraitsPerTile() const {
     // But don't exceed total traits
     traits_per_tile = std::min(traits_per_tile, config_.n_traits);
 
-    logInfo("Auto-calculated traits per tile: " + std::to_string(traits_per_tile) + 
-           " (aiming for ~1GB tiles)");
+    logInfo("Traits per tile: " + std::to_string(traits_per_tile) + 
+            " (auto, target ~1GB tiles)");
 
     return traits_per_tile;
 }
@@ -137,8 +137,8 @@ void Preprocessor::saveTraitsTiled() {
 
             generated_traits++;
             if (generated_traits % 1000 == 0 || generated_traits == config_.n_traits) {
-                logInfo("Generated " + std::to_string(generated_traits) + "/" +
-                        std::to_string(config_.n_traits) + " traits");
+                logDebug("Generated " + std::to_string(generated_traits) + "/" +
+                         std::to_string(config_.n_traits) + " traits");
             }
         }
 
@@ -150,11 +150,11 @@ void Preprocessor::saveTraitsTiled() {
 
         // Log progress for large number of tiles
         if (n_tiles > 50 && (tile_id + 1) % 10 == 0) {
-            logInfo("Saved " + std::to_string(tile_id + 1) + "/" + 
-                   std::to_string(n_tiles) + " tiles");
+            logDebug("Saved " + std::to_string(tile_id + 1) + "/" + 
+                     std::to_string(n_tiles) + " tiles");
         } else if (n_tiles <= 50) {
-            logInfo("Saved tile " + std::to_string(tile_id) + " (" + 
-                   std::to_string(traits_in_tile) + " traits)");
+            logDebug("Saved tile " + std::to_string(tile_id) + " (" + 
+                     std::to_string(traits_in_tile) + " traits)");
         }
     }
 
@@ -178,7 +178,7 @@ void Preprocessor::saveTraitsMetadata(const TraitsMetadata& meta) {
     }
     out << "\n";
 
-    logInfo("Saved traits metadata");
+    logDebug("Saved traits metadata");
 }
 
 void Preprocessor::processAndChunkVCF() {
@@ -192,7 +192,7 @@ void Preprocessor::processAndChunkVCF() {
 
     logInfo("Starting streaming VCF processing with chunk size: " + 
            std::to_string(config_.chunk_size));
-    logInfo("Memory-efficient mode: processing variants one at a time");
+    logDebug("Memory-efficient mode: processing variants one at a time");
 
     // Streaming state
     int chunk_id = 0;
@@ -224,8 +224,8 @@ void Preprocessor::processAndChunkVCF() {
             current_meta.n_samples = n_samples_;
 
             saveChunk(chunk_id, current_chunk_genotypes, current_meta);
-            logInfo("Saved chunk " + std::to_string(chunk_id) + " (" + 
-                   std::to_string(current_chunk_genotypes.size()) + " variants)");
+            logDebug("Saved chunk " + std::to_string(chunk_id) + " (" + 
+                     std::to_string(current_chunk_genotypes.size()) + " variants)");
 
             // Reset for next chunk
             chunk_id++;
@@ -245,8 +245,8 @@ void Preprocessor::processAndChunkVCF() {
         current_meta.n_samples = n_samples_;
 
         saveChunk(chunk_id, current_chunk_genotypes, current_meta);
-        logInfo("Saved final chunk " + std::to_string(chunk_id) + " (" + 
-               std::to_string(current_chunk_genotypes.size()) + " variants)");
+        logDebug("Saved final chunk " + std::to_string(chunk_id) + " (" + 
+                 std::to_string(current_chunk_genotypes.size()) + " variants)");
     }
 
     logInfo("VCF streaming completed: " + std::to_string(chunk_id + 1) + " chunks created");

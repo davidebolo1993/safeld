@@ -152,7 +152,7 @@ bool VCFProcessor::parseHeader() {
         return false;
     }
 
-    logInfo("Found " + std::to_string(n_samples) + " samples in VCF");
+    logDebug("Found " + std::to_string(n_samples) + " samples in VCF");
     return true;
 }
 
@@ -188,8 +188,8 @@ void VCFProcessor::setupTargetSamples(const std::string& sample_list_str) {
             }
         }
 
-        logInfo("Found " + std::to_string(target_samples_.size()) + " of " +
-                std::to_string(requested_samples.size()) + " requested samples");
+        logDebug("Found " + std::to_string(target_samples_.size()) + " of " +
+                 std::to_string(requested_samples.size()) + " requested samples");
     }
 }
 
@@ -210,7 +210,7 @@ bool VCFProcessor::initialize(const std::string& sample_list_str) {
         return false;
     }
 
-    logInfo("VCF processor initialized with " + std::to_string(target_samples_.size()) + " samples");
+    logDebug("VCF processor initialized with " + std::to_string(target_samples_.size()) + " samples");
     return true;
 }
 
@@ -354,7 +354,7 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
         throw std::runtime_error("Failed to open temporary deduplication spool file");
     }
 
-    logInfo("Starting single-pass variant scan with disk-backed duplicate handling...");
+    logDebug("Starting single-pass variant scan with disk-backed duplicate handling...");
 
     // Single pass on VCF: spool first occurrences, invalidate if duplicates appear later.
     bool has_prev_coord = false;
@@ -365,7 +365,7 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
         total_variants_++;
         bcf_unpack(rec_, BCF_UN_ALL);
         if (total_variants_ % 50000 == 0) {
-            logInfo("Scanned " + std::to_string(total_variants_) + " variants...");
+            logDebug("Scanned " + std::to_string(total_variants_) + " variants...");
         }
 
         std::string chrom = bcf_hdr_id2name(hdr_, rec_->rid);
@@ -482,7 +482,7 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
         emitted++;
 
         if (emitted % 10000 == 0) {
-            logInfo("Emitted " + std::to_string(emitted) + " deduplicated variants...");
+            logDebug("Emitted " + std::to_string(emitted) + " deduplicated variants...");
         }
     }
 
