@@ -117,7 +117,7 @@ ChunkMetadata ChunkedSimulator::loadChunkMetadata(int chunk_id) {
     ChunkMetadata meta;
     meta.chunk_id = chunk_id;
     std::string line;
-    // Read header lines
+    // parse metadata key/value lines first.
     while (std::getline(in, line) && line.find('=') != std::string::npos) {
         auto pos = line.find('=');
         std::string key = line.substr(0, pos);
@@ -126,7 +126,7 @@ ChunkMetadata ChunkedSimulator::loadChunkMetadata(int chunk_id) {
         else if (key == "n_samples") meta.n_samples = std::stoi(value);
     }
 
-    // Read variant records (already read first line in loop)
+    // line already contains the first variant record.
     do {
         std::istringstream ss(line);
         std::string chrom, id, ref, alt;
@@ -161,14 +161,12 @@ std::vector<std::vector<double>> ChunkedSimulator::loadChunkGenotypes(int chunk_
 void ChunkedSimulator::simulateChunk(int chunk_id) {
     logInfo("Starting simulation for chunk " + std::to_string(chunk_id));
     
-    // Load chunk data
     auto meta = loadChunkMetadata(chunk_id);
     auto genotypes = loadChunkGenotypes(chunk_id, meta.n_variants);
     
     logInfo("Processing chunk " + std::to_string(chunk_id) + ": " +
             std::to_string(meta.n_variants) + " variants");
 
-    // Process variants in batches to avoid excessive peak memory usage.
     const int variant_batch_size = std::max(1, config_.variant_batch_size);
     std::vector<std::vector<double>> all_synthetic_dosages;
     all_synthetic_dosages.reserve(meta.n_variants);
@@ -182,7 +180,6 @@ void ChunkedSimulator::simulateChunk(int chunk_id) {
         logInfo("Processing variant batch " + std::to_string(vbatch + 1) + "/" +
                 std::to_string(num_variant_batches) + " (" + std::to_string(vbatch_size) + " variants)");
         
-        // Flatten genotypes for this batch: G is V_batch x S (row-major)
         logDebug("  Flattening genotypes...");
         std::vector<double> G_flat(vbatch_size * traits_meta_.n_samples);
         for (int v = 0; v < vbatch_size; ++v) {
@@ -190,11 +187,9 @@ void ChunkedSimulator::simulateChunk(int chunk_id) {
                       G_flat.begin() + v * traits_meta_.n_samples);
         }
 
-        // Allocate result matrix: Y is V_batch x T (row-major)
         logDebug("  Allocating result matrix...");
         std::vector<double> Y_flat(vbatch_size * traits_meta_.n_traits, 0.0);
 
-        // Process traits tile-by-tile to avoid loading the full trait matrix.
         logDebug("  Starting GEMM computation...");
         Timer gemm_timer("BLAS GEMM for variant batch " + std::to_string(vbatch + 1));
 
@@ -240,7 +235,6 @@ void ChunkedSimulator::simulateChunk(int chunk_id) {
         
         logDebug("  GEMM completed for " + std::to_string(vbatch_size) + " variants");
 
-        // Convert flat result to scaled dosages for this batch
         logDebug("  Scaling results...");
         for (int v = 0; v < vbatch_size; ++v) {
             std::vector<double> row;
@@ -256,7 +250,6 @@ void ChunkedSimulator::simulateChunk(int chunk_id) {
     
     logInfo("All variants processed and scaled");
 
-    // Write output
     logInfo("Starting to write output for chunk " + std::to_string(chunk_id));
     writeChunkVCF(chunk_id, meta, all_synthetic_dosages);
     logInfo("Chunk " + std::to_string(chunk_id) + " completed successfully");
@@ -276,7 +269,6 @@ void ChunkedSimulator::writeChunkVCF(int chunk_id, const ChunkMetadata& meta,
             throw std::runtime_error("Failed to open output file: " + output_file);
         }
 
-        // Write header in smaller pieces
         std::string header = "##fileformat=VCFv4.1\n";
         header += "##source=safeld\n";
         for (const auto& contig_line : contig_header_lines_) {
@@ -285,18 +277,15 @@ void ChunkedSimulator::writeChunkVCF(int chunk_id, const ChunkMetadata& meta,
         header += "##FORMAT=<ID=DS,Number=1,Type=Float,Description=\"Dosage\">\n";
         bgzf_write(fp, header.c_str(), header.length());
         
-        // Write column header line
         std::string col_header = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT";
         bgzf_write(fp, col_header.c_str(), col_header.length());
         
-        // Write trait column names one at a time
         for (int i = 1; i <= traits_meta_.n_traits; i++) {
             std::string trait_col = "\t" + std::to_string(i);
             bgzf_write(fp, trait_col.c_str(), trait_col.length());
         }
         bgzf_write(fp, "\n", 1);
 
-        // Write variants
         for (int v = 0; v < meta.n_variants; v++) {
             std::string line;
             line.reserve(150000);
@@ -327,7 +316,6 @@ void ChunkedSimulator::writeChunkVCF(int chunk_id, const ChunkMetadata& meta,
             throw std::runtime_error("Failed to open output file: " + output_file);
         }
 
-        // Write header
         out << "##fileformat=VCFv4.1\n";
         out << "##source=safeld\n";
         for (const auto& contig_line : contig_header_lines_) {
@@ -340,7 +328,6 @@ void ChunkedSimulator::writeChunkVCF(int chunk_id, const ChunkMetadata& meta,
         }
         out << "\n";
 
-        // Write variants
         for (int v = 0; v < meta.n_variants; v++) {
             out << meta.chroms[v] << "\t"
                 << meta.positions[v] << "\t"
@@ -367,26 +354,21 @@ void ChunkedSimulator::run() {
     }
     logInfo("Variant batch size: " + std::to_string(config_.variant_batch_size));
     
-    // Load metadata once; trait tiles are streamed on demand.
     loadTraitsMetadata();
     loadHeaderMetadata();
     logInfo("Trait tiles will be streamed on demand during simulation");
 
-    // Create output directory
     if (mkdir(config_.output_dir.c_str(), 0755) != 0 && errno != EEXIST) {
         throw std::runtime_error("Failed to create output directory");
     }
 
-    // Determine which chunks to process
     std::string chunks_dir = config_.preprocessed_dir + "/chunks";
     std::vector<int> chunk_ids;
     if (config_.start_chunk >= 0 && config_.end_chunk >= 0) {
-        // Process specified range
         for (int i = config_.start_chunk; i <= config_.end_chunk; ++i) {
             chunk_ids.push_back(i);
         }
     } else {
-        // Find all available chunks
         int chunk_id = 0;
         while (true) {
             std::string meta_file = chunks_dir + "/chunk_" +
@@ -398,7 +380,6 @@ void ChunkedSimulator::run() {
     }
     logInfo("Processing " + std::to_string(chunk_ids.size()) + " chunks");
 
-    // Process chunks sequentially
     for (int chunk_id : chunk_ids) {
         simulateChunk(chunk_id);
     }

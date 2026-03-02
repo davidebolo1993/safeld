@@ -160,7 +160,6 @@ void VCFProcessor::setupTargetSamples(const std::string& sample_list_str) {
     int n_samples = bcf_hdr_nsamples(hdr_);
 
     if (sample_list_str.empty()) {
-        // Use all samples
         target_samples_.reserve(n_samples);
         sample_indices_.reserve(n_samples);
         for (int i = 0; i < n_samples; ++i) {
@@ -168,7 +167,6 @@ void VCFProcessor::setupTargetSamples(const std::string& sample_list_str) {
             sample_indices_.push_back(i);
         }
     } else {
-        // Parse requested samples
         auto requested_samples = split(sample_list_str, ',');
         std::unordered_map<std::string, int> sample_map;
         for (int i = 0; i < n_samples; ++i) {
@@ -177,7 +175,6 @@ void VCFProcessor::setupTargetSamples(const std::string& sample_list_str) {
 
         for (const auto& sample : requested_samples) {
             std::string trimmed = sample;
-            // Trim whitespace
             trimmed.erase(0, trimmed.find_first_not_of(" \t"));
             trimmed.erase(trimmed.find_last_not_of(" \t") + 1);
 
@@ -236,17 +233,14 @@ std::vector<std::string> VCFProcessor::getContigNames() const {
 }
 
 double VCFProcessor::extractAlleleFrequency(bcf1_t* rec) {
-    // Try to get AF from INFO field
     int n_values = 0;
     float* af_values = nullptr;
     if (bcf_get_info_float(hdr_, rec, "AF", &af_values, &n_values) > 0 && n_values > 0) {
         double af = static_cast<double>(af_values[0]);
         free(af_values);
-        // Ensure consistent precision (6 decimal places)
         return std::round(af * 1000000.0) / 1000000.0;
     }
 
-    // If AF not available, calculate from dosages
     std::vector<double> dosages;
     if (extractDosages(rec, dosages)) {
         double sum = 0.0;
@@ -263,7 +257,7 @@ double VCFProcessor::extractAlleleFrequency(bcf1_t* rec) {
         }
     }
 
-    return -1.0; // Unable to determine AF
+    return -1.0;
 }
 
 bool VCFProcessor::extractDosages(bcf1_t* rec, std::vector<double>& dosages) {
@@ -296,7 +290,7 @@ bool VCFProcessor::extractDosages(bcf1_t* rec, std::vector<double>& dosages) {
     return true;
 }
 
-// Streaming with duplicate detection.
+// stream variants with one-pass duplicate tracking.
 void VCFProcessor::streamVariants(VariantCallback callback) {
     Timer timer("VCF streaming");
     std::unordered_map<std::string, IdState> id_states;
@@ -356,7 +350,7 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
 
     logDebug("Starting single-pass variant scan with disk-backed duplicate handling...");
 
-    // Single pass on VCF: spool first occurrences, invalidate if duplicates appear later.
+    // make one pass over the VCF, spooling first occurrences and invalidating them if duplicates appear.
     bool has_prev_coord = false;
     std::string prev_chrom;
     int prev_pos = 0;
@@ -411,8 +405,7 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
         auto& state = id_states[id];
         state.count++;
         if (state.count > 1) {
-            // This ID is duplicated among MAF-passing variants.
-            // Invalidate the first spooled record once, then skip all later duplicates.
+            // invalidate the first kept record once, then skip later duplicates.
             if (state.count == 2 && state.has_spooled_record) {
                 spool.seekp(state.keep_offset);
                 uint8_t keep = 0;
@@ -427,7 +420,7 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
 
         if (dosages.empty()) {
             if (!extractDosages(rec_, dosages)) {
-                // Keep ID state for duplicate accounting semantics, but don't spool.
+                // keep duplicate accounting state even when dosages cannot be extracted.
                 state.has_spooled_record = false;
                 continue;
             }
@@ -455,7 +448,7 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
         }
     }
 
-    // Second phase on spool only (not on VCF): emit only records still marked as kept.
+    // read the spool and emit only records still marked as kept.
     spool.flush();
     spool.clear();
     spool.seekg(0, std::ios::beg);

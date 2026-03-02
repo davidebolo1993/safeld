@@ -6,7 +6,6 @@
 #include <queue>
 #include <atomic>
 
-// Generic object pool for memory reuse
 template<typename T>
 class ObjectPool {
 private:
@@ -19,7 +18,6 @@ private:
 public:
     explicit ObjectPool(size_t max_size = 1000) : max_size_(max_size) {}
     
-    // Get an object from the pool or create a new one
     template<typename... Args>
     std::unique_ptr<T> acquire(Args&&... args) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -35,7 +33,6 @@ public:
         return std::make_unique<T>(std::forward<Args>(args)...);
     }
     
-    // Return an object to the pool
     void release(std::unique_ptr<T> obj) {
         if (!obj) return;
         
@@ -44,10 +41,8 @@ public:
         if (pool_.size() < max_size_) {
             pool_.push(std::move(obj));
         }
-        // If pool is full, let the object be destroyed
     }
     
-    // Get statistics
     size_t getCreatedCount() const { return created_objects_.load(); }
     size_t getReusedCount() const { return reused_objects_.load(); }
     size_t getCurrentPoolSize() const {
@@ -56,7 +51,6 @@ public:
     }
 };
 
-// Specialized pools for common data structures
 class VectorPool {
 private:
     std::queue<std::vector<double>> double_vectors_;
@@ -68,20 +62,16 @@ private:
 public:
     explicit VectorPool(size_t max_size = 1000);
     
-    // Double vector operations
     std::vector<double> acquireDoubleVector(size_t reserve_size = 0);
     void releaseDoubleVector(std::vector<double>&& vec);
     
-    // String vector operations
     std::vector<std::string> acquireStringVector(size_t reserve_size = 0);
     void releaseStringVector(std::vector<std::string>&& vec);
     
-    // Statistics
     size_t getDoubleVectorPoolSize() const;
     size_t getStringVectorPoolSize() const;
 };
 
-// RAII wrapper for automatic pool management
 template<typename T>
 class PooledObject {
 private:
@@ -98,7 +88,6 @@ public:
         }
     }
     
-    // Move-only type
     PooledObject(const PooledObject&) = delete;
     PooledObject& operator=(const PooledObject&) = delete;
     
@@ -119,7 +108,6 @@ public:
         return *this;
     }
     
-    // Access operators
     T* operator->() { return obj_.get(); }
     const T* operator->() const { return obj_.get(); }
     T& operator*() { return *obj_; }
@@ -130,7 +118,6 @@ public:
     bool valid() const { return obj_ != nullptr; }
 };
 
-// RAII wrapper for vector pool
 class PooledDoubleVector {
 private:
     std::vector<double> vec_;
@@ -147,7 +134,6 @@ public:
         }
     }
     
-    // Move-only type
     PooledDoubleVector(const PooledDoubleVector&) = delete;
     PooledDoubleVector& operator=(const PooledDoubleVector&) = delete;
     
@@ -169,13 +155,11 @@ public:
         return *this;
     }
     
-    // Vector access
     std::vector<double>& get() { return vec_; }
     const std::vector<double>& get() const { return vec_; }
     std::vector<double>& operator*() { return vec_; }
     const std::vector<double>& operator*() const { return vec_; }
     
-    // Vector operations
     void resize(size_t size) { vec_.resize(size); }
     void reserve(size_t size) { vec_.reserve(size); }
     void clear() { vec_.clear(); }
@@ -186,13 +170,10 @@ public:
     const double& operator[](size_t index) const { return vec_[index]; }
 };
 
-// Global memory pools
 extern VectorPool g_vector_pool;
 extern ObjectPool<std::vector<double>> g_double_vector_pool;
 extern ObjectPool<std::vector<std::string>> g_string_vector_pool;
 
-// Convenience functions
 PooledDoubleVector acquireDoubleVector(size_t reserve_size = 0);
 std::vector<std::string> acquireStringVector(size_t reserve_size = 0);
 void releaseStringVector(std::vector<std::string>&& vec);
-

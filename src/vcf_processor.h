@@ -47,7 +47,6 @@ public:
 
     bool initialize(const std::string& sample_list = "");
 
-    // Streaming callback-based processing.
     using VariantCallback = std::function<void(std::unique_ptr<Variant>)>;
     void streamVariants(VariantCallback callback);
     std::vector<std::string> getContigNames() const;

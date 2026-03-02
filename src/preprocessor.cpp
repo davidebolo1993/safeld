@@ -39,20 +39,17 @@ void Preprocessor::saveHeaderMetadata(const std::vector<std::string>& contig_nam
 }
 
 void Preprocessor::createOutputDirectories() {
-    // Create base directory
     if (mkdir(config_.output_dir.c_str(), 0755) != 0 && errno != EEXIST) {
         throw std::runtime_error("Failed to create output directory: " + 
                                std::string(strerror(errno)));
     }
 
-    // Create traits subdirectory
     std::string traits_dir = getTraitsDir();
     if (mkdir(traits_dir.c_str(), 0755) != 0 && errno != EEXIST) {
         throw std::runtime_error("Failed to create traits directory: " + 
                                std::string(strerror(errno)));
     }
 
-    // Create chunks subdirectory
     std::string chunks_dir = getChunksDir();
     if (mkdir(chunks_dir.c_str(), 0755) != 0 && errno != EEXIST) {
         throw std::runtime_error("Failed to create chunks directory: " + 
@@ -71,18 +68,15 @@ void Preprocessor::generateAndSaveTraits() {
 
 int Preprocessor::calculateTraitsPerTile() const {
     if (config_.traits_per_tile > 0) {
-        // User-specified value
         logDebug("Using user-specified traits per tile: " + 
                 std::to_string(config_.traits_per_tile));
         return config_.traits_per_tile;
     }
 
-    // Auto-calculate to aim for ~1GB per tile
-    const size_t target_tile_size = 1024 * 1024 * 1024;  // 1 GB
+    const size_t target_tile_size = 1024 * 1024 * 1024;
     size_t bytes_per_trait = n_samples_ * sizeof(double);
     int traits_per_tile = std::max(1, static_cast<int>(target_tile_size / bytes_per_trait));
 
-    // But don't exceed total traits
     traits_per_tile = std::min(traits_per_tile, config_.n_traits);
 
     logInfo("Traits per tile: " + std::to_string(traits_per_tile) + 
@@ -94,7 +88,6 @@ int Preprocessor::calculateTraitsPerTile() const {
 void Preprocessor::saveTraitsTiled() {
     Timer timer("Saving traits to disk");
 
-    // Calculate traits per tile (auto or user-specified)
     int traits_per_tile = calculateTraitsPerTile();
     int n_tiles = (config_.n_traits + traits_per_tile - 1) / traits_per_tile;
 
@@ -127,7 +120,6 @@ void Preprocessor::saveTraitsTiled() {
             throw std::runtime_error("Failed to open trait tile file: " + tile_file);
         }
 
-        // Generate and write one trait row at a time to keep memory bounded.
         for (int t = 0; t < traits_in_tile; ++t) {
             for (int j = 0; j < n_samples_; ++j) {
                 trait_row[j] = dist(gen);
@@ -148,7 +140,6 @@ void Preprocessor::saveTraitsTiled() {
 
         meta.tile_trait_counts.push_back(traits_in_tile);
 
-        // Log progress for large number of tiles
         if (n_tiles > 50 && (tile_id + 1) % 10 == 0) {
             logDebug("Saved " + std::to_string(tile_id + 1) + "/" + 
                      std::to_string(n_tiles) + " tiles");
@@ -184,7 +175,6 @@ void Preprocessor::saveTraitsMetadata(const TraitsMetadata& meta) {
 void Preprocessor::processAndChunkVCF() {
     Timer timer("VCF processing and chunking");
 
-    // Initialize VCF processor
     VCFProcessor processor(config_.vcf_file, config_.maf_filter);
     if (!processor.initialize(config_.sample_list)) {
         throw std::runtime_error("Failed to initialize VCF processor");
@@ -194,12 +184,10 @@ void Preprocessor::processAndChunkVCF() {
            std::to_string(config_.chunk_size));
     logDebug("Memory-efficient mode: processing variants one at a time");
 
-    // Streaming state
     int chunk_id = 0;
     std::vector<std::vector<double>> current_chunk_genotypes;
     ChunkMetadata current_meta;
 
-    // Pre-allocate for one chunk
     current_chunk_genotypes.reserve(config_.chunk_size);
     current_meta.variant_ids.reserve(config_.chunk_size);
     current_meta.chroms.reserve(config_.chunk_size);
@@ -207,9 +195,7 @@ void Preprocessor::processAndChunkVCF() {
     current_meta.refs.reserve(config_.chunk_size);
     current_meta.alts.reserve(config_.chunk_size);
 
-    // Stream variants one at a time
     processor.streamVariants([&](std::unique_ptr<Variant> variant) {
-        // Standardize and add to current chunk
         current_chunk_genotypes.push_back(standardize(variant->dosages));
         current_meta.variant_ids.push_back(std::move(variant->id));
         current_meta.chroms.push_back(std::move(variant->chrom));
@@ -217,7 +203,6 @@ void Preprocessor::processAndChunkVCF() {
         current_meta.refs.push_back(std::move(variant->ref));
         current_meta.alts.push_back(std::move(variant->alt));
 
-        // When chunk is full, save it and clear
         if (current_chunk_genotypes.size() >= static_cast<size_t>(config_.chunk_size)) {
             current_meta.chunk_id = chunk_id;
             current_meta.n_variants = current_chunk_genotypes.size();
@@ -227,7 +212,6 @@ void Preprocessor::processAndChunkVCF() {
             logDebug("Saved chunk " + std::to_string(chunk_id) + " (" + 
                      std::to_string(current_chunk_genotypes.size()) + " variants)");
 
-            // Reset for next chunk
             chunk_id++;
             current_chunk_genotypes.clear();
             current_meta.variant_ids.clear();
@@ -238,7 +222,6 @@ void Preprocessor::processAndChunkVCF() {
         }
     });
 
-    // Save final partial chunk if any
     if (!current_chunk_genotypes.empty()) {
         current_meta.chunk_id = chunk_id;
         current_meta.n_variants = current_chunk_genotypes.size();
@@ -254,7 +237,6 @@ void Preprocessor::processAndChunkVCF() {
 
 void Preprocessor::saveChunk(int chunk_id, const std::vector<std::vector<double>>& genotypes,
                              const ChunkMetadata& meta) {
-    // Save binary genotype data
     std::string bin_file = getChunksDir() + "/chunk_" + std::to_string(chunk_id) + ".bin";
     std::ofstream out(bin_file, std::ios::binary);
     if (!out) {
@@ -266,7 +248,6 @@ void Preprocessor::saveChunk(int chunk_id, const std::vector<std::vector<double>
                  n_samples_ * sizeof(double));
     }
 
-    // Save metadata
     saveChunkMetadata(meta);
 }
 
@@ -294,10 +275,8 @@ void Preprocessor::saveChunkMetadata(const ChunkMetadata& meta) {
 void Preprocessor::run() {
     logInfo("Starting preprocessing...");
 
-    // Create output structure
     createOutputDirectories();
 
-    // Process VCF to get sample count
     VCFProcessor temp_processor(config_.vcf_file, config_.maf_filter);
     if (!temp_processor.initialize(config_.sample_list)) {
         throw std::runtime_error("Failed to initialize VCF processor");
@@ -305,10 +284,8 @@ void Preprocessor::run() {
     n_samples_ = temp_processor.getTargetSamples().size();
     saveHeaderMetadata(temp_processor.getContigNames());
 
-    // Generate and save traits
     generateAndSaveTraits();
 
-    // Process and chunk VCF (now using streaming!)
     processAndChunkVCF();
 
     logInfo("Preprocessing completed successfully!");

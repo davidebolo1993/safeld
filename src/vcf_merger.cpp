@@ -94,8 +94,7 @@ std::vector<std::string> VCFMerger::findChunkFiles() {
     }
     closedir(dir);
     
-    // Sort numerically by chunk id to avoid lexical ordering issues
-    // (e.g., chunk_10 before chunk_2).
+    // sort numerically by chunk id so chunk_10 comes after chunk_2.
     auto chunkId = [](const std::string& path) {
         size_t slash = path.find_last_of('/');
         std::string filename = (slash == std::string::npos) ? path : path.substr(slash + 1);
@@ -135,7 +134,6 @@ bool VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
     
     logDebug("Merging " + std::to_string(chunk_files.size()) + " chunk files using fast block I/O");
     
-    // Open output file
     BGZF* out_fp = nullptr;
     std::ofstream out_file;
     
@@ -176,15 +174,12 @@ bool VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
                 continue;
             }
             
-            // Fast path for compressed files: use kstring with bgzf_getline
             int line_count = 0;
             while (bgzf_getline(in_fp, '\n', &line) >= 0) {
                 line_count++;
                 
-                // Skip empty lines
                 if (line.l == 0) continue;
                 
-                // Handle header
                 if (line.s[0] == '#') {
                     if (!header_written) {
                         std::string contig_id = parseContigId(std::string_view(line.s, line.l));
@@ -235,7 +230,6 @@ bool VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
                     }
                 }
                 
-                // Write variant line
                 if (out_fp) {
                     bgzf_write(out_fp, line.s, line.l);
                     bgzf_write(out_fp, "\n", 1);
@@ -244,7 +238,6 @@ bool VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
                     out_file << "\n";
                 }
                 
-                // Progress update for large files
                 if (line_count % 50000 == 0) {
                     logDebug("  Processed " + std::to_string(line_count) + " lines...");
                 }
@@ -253,7 +246,6 @@ bool VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
             bgzf_close(in_fp);
             
         } else {
-            // Uncompressed files: use std::getline
             in_file.open(chunk_file);
             if (!in_file) {
                 logWarning("Failed to open chunk file: " + chunk_file);
@@ -269,7 +261,6 @@ bool VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
                 
                 if (str_line.empty()) continue;
                 
-                // Handle header
                 if (str_line[0] == '#') {
                     if (!header_written) {
                         std::string contig_id = parseContigId(str_line);
@@ -319,7 +310,6 @@ bool VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
                     }
                 }
                 
-                // Write variant line
                 if (out_fp) {
                     bgzf_write(out_fp, str_line.c_str(), str_line.length());
                     bgzf_write(out_fp, "\n", 1);

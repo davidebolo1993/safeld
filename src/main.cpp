@@ -51,7 +51,6 @@ int main(int argc, char* argv[]) {
 
         std::string mode = argv[1];
 
-        // Handle help before initializing anything
         if (mode == "-h" || mode == "--help" || mode == "help") {
             printUsage(argv[0]);
             return 0;
@@ -66,7 +65,6 @@ int main(int argc, char* argv[]) {
         }
         setVerboseLogging(verbose_logs);
 
-        // Now that we're past help checks, log initialization
         logInfo("SAFELD initialized");
 
         if (mode == "preprocess") {
@@ -87,11 +85,6 @@ int main(int argc, char* argv[]) {
                     std::cout << "  -traits-per-tile INT Traits per tile (default: auto, ~1GB tiles)\n";
                     std::cout << "  -h, --help           Show this help message\n\n";
                     std::cout << "Note: input VCF must be coordinate-sorted.\n\n";
-                    std::cout << "Examples:\n";
-                    std::cout << "  # Auto tile size (recommended)\n";
-                    std::cout << "  " << argv[0] << " preprocess -vcf input.vcf.gz -out prep -ntraits 10000\n\n";
-                    std::cout << "  # Custom tile size (250 traits per tile)\n";
-                    std::cout << "  " << argv[0] << " preprocess -vcf input.vcf.gz -out prep -ntraits 10000 -traits-per-tile 250\n\n";
                     return 0;
                 }
 
@@ -109,8 +102,6 @@ int main(int argc, char* argv[]) {
                     config.chunk_size = std::stoi(argv[++i]);
                 } else if (arg == "-traits-per-tile" && i + 1 < argc) {
                     config.traits_per_tile = std::stoi(argv[++i]);
-                } else if (arg == "-verbose") {
-                    // Handled globally.
                 }
             }
 
@@ -157,8 +148,6 @@ int main(int argc, char* argv[]) {
                     config.start_chunk = std::stoi(argv[++i]);
                 } else if (arg == "-end-chunk" && i + 1 < argc) {
                     config.end_chunk = std::stoi(argv[++i]);
-                } else if (arg == "-verbose") {
-                    // Handled globally.
                 }
             }
 
@@ -177,7 +166,7 @@ int main(int argc, char* argv[]) {
 
         } else if (mode == "merge") {
             MergerConfig config;
-            config.compress_output = true;  // default
+            config.compress_output = true;
 
             for (int i = 2; i < argc; ++i) {
                 std::string arg = argv[i];
@@ -204,8 +193,6 @@ int main(int argc, char* argv[]) {
                     config.write_index = false;
                 } else if (arg == "-no-sort") {
                     config.enforce_sort = false;
-                } else if (arg == "-verbose") {
-                    // Handled globally.
                 }
             }
 
