@@ -246,7 +246,7 @@ bool VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
                 
                 // Progress update for large files
                 if (line_count % 50000 == 0) {
-                    logInfo("  Processed " + std::to_string(line_count) + " lines...");
+                    logDebug("  Processed " + std::to_string(line_count) + " lines...");
                 }
             }
             
@@ -328,7 +328,7 @@ bool VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
                 }
                 
                 if (line_count % 50000 == 0) {
-                    logInfo("  Processed " + std::to_string(line_count) + " lines...");
+                    logDebug("  Processed " + std::to_string(line_count) + " lines...");
                 }
             }
         }

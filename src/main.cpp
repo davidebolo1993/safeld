@@ -17,6 +17,8 @@ void printUsage(const char* program_name) {
     std::cout << "    -chunk-size INT      Variants per chunk (default: 10000)\n";
     std::cout << "    -traits-per-tile INT Traits per tile (default: auto, ~1GB tiles)\n";
     std::cout << "    -h, --help           Show this help message\n\n";
+    std::cout << "Global options:\n";
+    std::cout << "    -verbose             Enable detailed debug logging\n\n";
     std::cout << "  Note: input VCF must be coordinate-sorted.\n\n";
 
     std::cout << "Stage 2 - Simulation:\n";
@@ -24,6 +26,7 @@ void printUsage(const char* program_name) {
     std::cout << "    -prep DIR            Preprocessed data directory (required)\n";
     std::cout << "    -out DIR             Output directory for results\n";
     std::cout << "    -workers INT         Number of threads (default: auto)\n";
+    std::cout << "    -variant-batch-size INT Variants per simulation batch (default: 4000)\n";
     std::cout << "    -compress            Compress output\n";
     std::cout << "    -start-chunk INT     First chunk to process (default: all)\n";
     std::cout << "    -end-chunk INT       Last chunk to process (default: all)\n";
@@ -53,6 +56,15 @@ int main(int argc, char* argv[]) {
             printUsage(argv[0]);
             return 0;
         }
+
+        bool verbose_logs = false;
+        for (int i = 1; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "-verbose") {
+                verbose_logs = true;
+            }
+        }
+        setVerboseLogging(verbose_logs);
 
         // Now that we're past help checks, log initialization
         logInfo("SAFELD initialized");
@@ -97,6 +109,8 @@ int main(int argc, char* argv[]) {
                     config.chunk_size = std::stoi(argv[++i]);
                 } else if (arg == "-traits-per-tile" && i + 1 < argc) {
                     config.traits_per_tile = std::stoi(argv[++i]);
+                } else if (arg == "-verbose") {
+                    // Handled globally.
                 }
             }
 
@@ -121,6 +135,7 @@ int main(int argc, char* argv[]) {
                     std::cout << "  -prep DIR          Preprocessed data directory (required)\n";
                     std::cout << "  -out DIR           Output directory for results (required)\n";
                     std::cout << "  -workers INT       Number of threads (default: auto-detect)\n";
+                    std::cout << "  -variant-batch-size INT Variants per simulation batch (default: 4000)\n";
                     std::cout << "  -compress          Compress output VCF chunks\n";
                     std::cout << "  -start-chunk INT   First chunk to process (default: all)\n";
                     std::cout << "  -end-chunk INT     Last chunk to process (default: all)\n";
@@ -134,18 +149,26 @@ int main(int argc, char* argv[]) {
                     config.output_dir = argv[++i];
                 } else if (arg == "-workers" && i + 1 < argc) {
                     config.n_workers = std::stoi(argv[++i]);
+                } else if (arg == "-variant-batch-size" && i + 1 < argc) {
+                    config.variant_batch_size = std::stoi(argv[++i]);
                 } else if (arg == "-compress") {
                     config.compress_output = true;
                 } else if (arg == "-start-chunk" && i + 1 < argc) {
                     config.start_chunk = std::stoi(argv[++i]);
                 } else if (arg == "-end-chunk" && i + 1 < argc) {
                     config.end_chunk = std::stoi(argv[++i]);
+                } else if (arg == "-verbose") {
+                    // Handled globally.
                 }
             }
 
             if (config.preprocessed_dir.empty() || config.output_dir.empty()) {
                 logError("Preprocessed directory and output directory are required");
                 std::cout << "\nUse: " << argv[0] << " simulate --help for usage information\n";
+                return 1;
+            }
+            if (config.variant_batch_size <= 0) {
+                logError("variant-batch-size must be > 0");
                 return 1;
             }
 
@@ -181,6 +204,8 @@ int main(int argc, char* argv[]) {
                     config.write_index = false;
                 } else if (arg == "-no-sort") {
                     config.enforce_sort = false;
+                } else if (arg == "-verbose") {
+                    // Handled globally.
                 }
             }
 

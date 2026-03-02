@@ -20,6 +20,7 @@ SAFELD processes VCF files to generate synthetic traits while preserving the lin
 - **Docker Support**: Containerized deployment for reproducibility
 - **Scalable Workflow**: Three-stage pipeline (`preprocess`, `simulate`, `merge`) for large cohorts and high trait counts
 - **Tile Streaming**: Trait tiles are generated and consumed on demand to keep RAM bounded
+- **Configurable Batching**: Simulation variant batch size is tunable via CLI
 - **VCF Compliance**: Chunk outputs include `##contig` header records for downstream tools
 - **Sorted Merge + Indexing**: Merge validates sort order and builds tabix indexes in-house (HTSlib)
 
@@ -76,6 +77,9 @@ docker run --rm -v $(pwd):/data safeld preprocess -vcf /data/input.vcf.gz -out /
 
 SAFELD uses a **three-stage workflow**:
 
+Global option:
+- `-verbose` Enable detailed debug logging
+
 #### Stage 1: Preprocessing
 
 Generates trait matrix and partitions variants into chunks.
@@ -109,6 +113,7 @@ Options:
 **Output structure:**
 ```
 preprocessed_data/
+├── header_contigs.txt    # Serialized ##contig header lines
 ├── traits/
 │   ├── W_tile_0.bin      # Trait matrix (tiled if large)
 │   ├── W_tile_1.bin
@@ -130,6 +135,7 @@ Processes chunks to generate synthetic traits. Each chunk uses all available cor
 ./safeld simulate \
   -prep preprocessed_data \
   -out results \
+  -variant-batch-size 4000 \
   -workers 32 \
   -compress
 
@@ -137,6 +143,7 @@ Processes chunks to generate synthetic traits. Each chunk uses all available cor
 ./safeld simulate \
   -prep preprocessed_data \
   -out results \
+  -variant-batch-size 4000 \
   -start-chunk 0 \
   -end-chunk 9 \
   -workers 32 \
@@ -152,6 +159,7 @@ Options:
   -prep DIR          Preprocessed data directory (required)
   -out DIR           Output directory for results (required)
   -workers INT       Number of threads (default: auto-detect)
+  -variant-batch-size INT Variants per simulation batch (default: 4000)
   -compress          Compress output VCF chunks
   -start-chunk INT   First chunk to process (default: all)
   -end-chunk INT     Last chunk to process (default: all)
@@ -162,6 +170,8 @@ Options:
 #### Stage 3: Merge
 
 Combines all chunk VCF files into a single output file.
+When output is compressed, a `.tbi` index is created by default.
+If merged chunks are unexpectedly unsorted, merge falls back to `bcftools sort`.
 
 ```bash
 ./safeld merge \
@@ -221,6 +231,7 @@ SAFELD separates preprocessing from simulation for scalability:
 1. Load trait metadata once
 2. For each chunk:
    - Load standardized genotypes G (B × S)
+   - Process variants in configurable batches (`-variant-batch-size`)
    - Stream trait tiles and compute Y = G × W^T using optimized BLAS GEMM
    - Scale synthetic dosages to [0, 2] range
    - Write chunk VCF to disk
@@ -253,6 +264,7 @@ SAFELD separates preprocessing from simulation for scalability:
 ```txt
 ##fileformat=VCFv4.1
 ##source=safeld
+##contig=<ID=22>
 ##FORMAT=<ID=DS,Number=1,Type=Float,Description="Dosage">
 #CHROM  POS     ID      REF  ALT  QUAL  FILTER  INFO  FORMAT  T1    T2    ...
 chr1    1000    rs123   A    G    .     PASS    .     DS      1.23  0.45  ...

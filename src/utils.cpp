@@ -5,13 +5,31 @@
 #include <numeric>
 #include <cmath>
 #include <mutex>
+#include <atomic>
 
 // Thread-safe logging
 static std::mutex log_mutex;
+static std::atomic<bool> verbose_logging{false};
+
+void setVerboseLogging(bool enabled) {
+    verbose_logging.store(enabled);
+}
+
+bool isVerboseLogging() {
+    return verbose_logging.load();
+}
 
 void logInfo(const std::string& message) {
     std::lock_guard<std::mutex> lock(log_mutex);
     std::cout << "[INFO] " << message << std::endl;
+}
+
+void logDebug(const std::string& message) {
+    if (!verbose_logging.load()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(log_mutex);
+    std::cout << "[DEBUG] " << message << std::endl;
 }
 
 void logWarning(const std::string& message) {
@@ -111,7 +129,7 @@ Timer::Timer(const std::string& timer_name) : name(timer_name) {
 
 Timer::~Timer() {
     double elapsed_time = elapsed();
-    logInfo(name + " completed in " + std::to_string(elapsed_time) + " seconds");
+    logDebug(name + " completed in " + std::to_string(elapsed_time) + " seconds");
 }
 
 void Timer::reset() {
@@ -123,4 +141,3 @@ double Timer::elapsed() const {
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
     return duration.count() / 1000000.0; // Convert to seconds
 }
-

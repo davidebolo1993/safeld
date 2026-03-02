@@ -168,22 +168,22 @@ void ChunkedSimulator::simulateChunk(int chunk_id) {
     logInfo("Processing chunk " + std::to_string(chunk_id) + ": " +
             std::to_string(meta.n_variants) + " variants");
 
-    // Process variants in batches to avoid exceeding vector max_size
-    static constexpr int VARIANT_BATCH_SIZE = 4000;  // Process 4000 variants at a time
+    // Process variants in batches to avoid excessive peak memory usage.
+    const int variant_batch_size = std::max(1, config_.variant_batch_size);
     std::vector<std::vector<double>> all_synthetic_dosages;
     all_synthetic_dosages.reserve(meta.n_variants);
     
-    int num_variant_batches = (meta.n_variants + VARIANT_BATCH_SIZE - 1) / VARIANT_BATCH_SIZE;
+    int num_variant_batches = (meta.n_variants + variant_batch_size - 1) / variant_batch_size;
     
     for (int vbatch = 0; vbatch < num_variant_batches; ++vbatch) {
-        int vbatch_start = vbatch * VARIANT_BATCH_SIZE;
-        int vbatch_size = std::min(VARIANT_BATCH_SIZE, meta.n_variants - vbatch_start);
+        int vbatch_start = vbatch * variant_batch_size;
+        int vbatch_size = std::min(variant_batch_size, meta.n_variants - vbatch_start);
         
         logInfo("Processing variant batch " + std::to_string(vbatch + 1) + "/" +
                 std::to_string(num_variant_batches) + " (" + std::to_string(vbatch_size) + " variants)");
         
         // Flatten genotypes for this batch: G is V_batch x S (row-major)
-        logInfo("  Flattening genotypes...");
+        logDebug("  Flattening genotypes...");
         std::vector<double> G_flat(vbatch_size * traits_meta_.n_samples);
         for (int v = 0; v < vbatch_size; ++v) {
             std::copy(genotypes[vbatch_start + v].begin(), genotypes[vbatch_start + v].end(),
@@ -191,20 +191,20 @@ void ChunkedSimulator::simulateChunk(int chunk_id) {
         }
 
         // Allocate result matrix: Y is V_batch x T (row-major)
-        logInfo("  Allocating result matrix...");
+        logDebug("  Allocating result matrix...");
         std::vector<double> Y_flat(vbatch_size * traits_meta_.n_traits, 0.0);
 
         // Process traits tile-by-tile to avoid loading the full trait matrix.
-        logInfo("  Starting GEMM computation...");
+        logDebug("  Starting GEMM computation...");
         Timer gemm_timer("BLAS GEMM for variant batch " + std::to_string(vbatch + 1));
 
         int global_trait_start = 0;
         for (int tile_id = 0; tile_id < traits_meta_.n_tiles; ++tile_id) {
             int traits_in_tile = traits_meta_.tile_trait_counts[tile_id];
             auto tile_data = loadTraitsTileData(tile_id, traits_in_tile);
-            logInfo("    Loaded trait tile " + std::to_string(tile_id + 1) + "/" +
-                    std::to_string(traits_meta_.n_tiles) + " (" +
-                    std::to_string(traits_in_tile) + " traits)");
+            logDebug("    Loaded trait tile " + std::to_string(tile_id + 1) + "/" +
+                     std::to_string(traits_meta_.n_tiles) + " (" +
+                     std::to_string(traits_in_tile) + " traits)");
 
             int num_trait_batches = (traits_in_tile + TRAIT_BATCH_SIZE - 1) / TRAIT_BATCH_SIZE;
             for (int tbatch = 0; tbatch < num_trait_batches; ++tbatch) {
@@ -238,10 +238,10 @@ void ChunkedSimulator::simulateChunk(int chunk_id) {
             throw std::runtime_error("Trait tile metadata mismatch during simulation");
         }
         
-        logInfo("  GEMM completed for " + std::to_string(vbatch_size) + " variants");
+        logDebug("  GEMM completed for " + std::to_string(vbatch_size) + " variants");
 
         // Convert flat result to scaled dosages for this batch
-        logInfo("  Scaling results...");
+        logDebug("  Scaling results...");
         for (int v = 0; v < vbatch_size; ++v) {
             std::vector<double> row;
             row.reserve(traits_meta_.n_traits);
@@ -316,8 +316,8 @@ void ChunkedSimulator::writeChunkVCF(int chunk_id, const ChunkMetadata& meta,
             bgzf_write(fp, line.c_str(), line.length());
 
             if ((v + 1) % 1000 == 0 || v == meta.n_variants - 1) {
-                logInfo("  Written " + std::to_string(v + 1) + "/" +
-                        std::to_string(meta.n_variants) + " variants");
+                logDebug("  Written " + std::to_string(v + 1) + "/" +
+                         std::to_string(meta.n_variants) + " variants");
             }
         }
         bgzf_close(fp);
@@ -352,8 +352,8 @@ void ChunkedSimulator::writeChunkVCF(int chunk_id, const ChunkMetadata& meta,
             }
             out << "\n";
             if ((v + 1) % 1000 == 0 || v == meta.n_variants - 1) {
-                logInfo("  Written " + std::to_string(v + 1) + "/" +
-                        std::to_string(meta.n_variants) + " variants");
+                logDebug("  Written " + std::to_string(v + 1) + "/" +
+                         std::to_string(meta.n_variants) + " variants");
             }
         }
     }
@@ -362,6 +362,10 @@ void ChunkedSimulator::writeChunkVCF(int chunk_id, const ChunkMetadata& meta,
 
 void ChunkedSimulator::run() {
     logInfo("Starting chunked simulation...");
+    if (config_.variant_batch_size <= 0) {
+        throw std::runtime_error("variant_batch_size must be > 0");
+    }
+    logInfo("Variant batch size: " + std::to_string(config_.variant_batch_size));
     
     // Load metadata once; trait tiles are streamed on demand.
     loadTraitsMetadata();

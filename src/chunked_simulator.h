@@ -10,6 +10,7 @@ struct SimulationConfig {
     std::string output_dir;
     int n_workers = 0;  // 0 = auto-detect
     bool compress_output = false;
+    int variant_batch_size = 4000;
     int start_chunk = -1;  // -1 = process all chunks
     int end_chunk = -1;
 };
