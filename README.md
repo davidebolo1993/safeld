@@ -21,8 +21,6 @@ SAFELD processes VCF files to generate synthetic traits while preserving the lin
 - **Scalable Workflow**: Three-stage pipeline (`preprocess`, `simulate`, `merge`) for large cohorts and high trait counts
 - **Tile Streaming**: Trait tiles are generated and consumed on demand to keep RAM bounded
 - **Configurable Batching**: Simulation variant batch size is tunable via CLI
-- **VCF Compliance**: Chunk outputs include `##contig` header records for downstream tools
-- **Sorted Merge + Indexing**: Merge validates sort order and builds tabix indexes in-house (HTSlib)
 
 ## Installation
 
@@ -48,7 +46,7 @@ make -j $(nproc)
 ```
 
 This builds one executable:
-- `safeld` - Three-stage workflow (memory-efficient and scalable)
+- `safeld`
 
 ### Manual Installation
 
@@ -68,7 +66,7 @@ make -j $(nproc)
 docker build -t safeld .
 
 # Run with Docker (example: stage 1 preprocess)
-docker run --rm -v $(pwd):/data safeld preprocess -vcf /data/input.vcf.gz -out /data/prep -ntraits 10000
+docker run --rm -v $(pwd):/data safeld preprocess -vcf /data/input.vcf.gz -out /data/prep
 ```
 
 ## Usage
@@ -89,8 +87,7 @@ Input VCF must be coordinate-sorted.
 ./safeld preprocess \
   -vcf input.vcf.gz \
   -out preprocessed_data \
-  -ntraits 10000 \
-  -chunk-size 5000 \
+  -ntraits 5000 \
   -maf 0.01
 ```
 
@@ -135,7 +132,6 @@ Processes chunks to generate synthetic traits. Each chunk uses all available cor
 ./safeld simulate \
   -prep preprocessed_data \
   -out results \
-  -variant-batch-size 4000 \
   -workers 32 \
   -compress
 
@@ -143,7 +139,6 @@ Processes chunks to generate synthetic traits. Each chunk uses all available cor
 ./safeld simulate \
   -prep preprocessed_data \
   -out results \
-  -variant-batch-size 4000 \
   -start-chunk 0 \
   -end-chunk 9 \
   -workers 32 \
@@ -191,30 +186,6 @@ Options:
   -no-index          Don't create tabix index for compressed output
   -no-sort           Skip sortedness enforcement during merge
   -h, --help         Show this help message
-```
-
-### Complete Workflow Example
-
-```bash
-# 1. Preprocess (one time per dataset)
-./safeld preprocess \
-  -vcf large_dataset.vcf.gz \
-  -out preprocessed_chr22 \
-  -ntraits 10000 \
-  -chunk-size 5000 \
-  -maf 0.01
-
-# 2. Simulate (can be parallelized)
-./safeld simulate \
-  -prep preprocessed_chr22 \
-  -out results_chr22 \
-  -workers 32 \
-  -compress
-
-# 3. Merge
-./safeld merge \
-  -in results_chr22 \
-  -out chr22_final.vcf.gz
 ```
 
 ## Algorithm
