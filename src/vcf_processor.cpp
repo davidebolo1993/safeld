@@ -7,6 +7,7 @@
 #include <sstream>
 #include <cmath>
 #include <cstring>
+#include <climits>
 #include <unistd.h>
 
 namespace {
@@ -213,6 +214,27 @@ bool VCFProcessor::initialize(const std::string& sample_list_str) {
     return true;
 }
 
+std::vector<std::string> VCFProcessor::getContigNames() const {
+    std::vector<std::string> contigs;
+    if (!hdr_) {
+        return contigs;
+    }
+
+    int nseq = 0;
+    char** seqnames = bcf_hdr_seqnames(hdr_, &nseq);
+    if (!seqnames || nseq <= 0) {
+        free(seqnames);
+        return contigs;
+    }
+
+    contigs.reserve(nseq);
+    for (int i = 0; i < nseq; ++i) {
+        contigs.emplace_back(seqnames[i]);
+    }
+    free(seqnames);
+    return contigs;
+}
+
 double VCFProcessor::extractAlleleFrequency(bcf1_t* rec) {
     // Try to get AF from INFO field
     int n_values = 0;
@@ -278,10 +300,18 @@ bool VCFProcessor::extractDosages(bcf1_t* rec, std::vector<double>& dosages) {
 void VCFProcessor::streamVariants(VariantCallback callback) {
     Timer timer("VCF streaming");
     std::unordered_map<std::string, IdState> id_states;
+    std::unordered_map<std::string, int> contig_rank;
 
     total_variants_ = 0;
     filtered_variants_ = 0;
     duplicate_variants_ = 0;
+
+    {
+        int rank = 0;
+        for (const auto& contig : getContigNames()) {
+            contig_rank[contig] = rank++;
+        }
+    }
 
     auto tryExtractAfFromInfo = [&](bcf1_t* rec, double& af) -> bool {
         int n_values = 0;
@@ -327,12 +357,41 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
     logInfo("Starting single-pass variant scan with disk-backed duplicate handling...");
 
     // Single pass on VCF: spool first occurrences, invalidate if duplicates appear later.
+    bool has_prev_coord = false;
+    std::string prev_chrom;
+    int prev_pos = 0;
+
     while (bcf_read(vcf_fp_, hdr_, rec_) == 0) {
         total_variants_++;
         bcf_unpack(rec_, BCF_UN_ALL);
         if (total_variants_ % 50000 == 0) {
             logInfo("Scanned " + std::to_string(total_variants_) + " variants...");
         }
+
+        std::string chrom = bcf_hdr_id2name(hdr_, rec_->rid);
+        int pos = rec_->pos + 1;
+        if (has_prev_coord) {
+            int prev_rank = contig_rank.contains(prev_chrom) ? contig_rank[prev_chrom] : INT_MAX;
+            int curr_rank = contig_rank.contains(chrom) ? contig_rank[chrom] : INT_MAX;
+
+            bool out_of_order = false;
+            if (prev_rank != INT_MAX && curr_rank != INT_MAX) {
+                out_of_order = (curr_rank < prev_rank) || (curr_rank == prev_rank && pos < prev_pos);
+            } else if (chrom != prev_chrom) {
+                out_of_order = chrom < prev_chrom;
+            } else {
+                out_of_order = pos < prev_pos;
+            }
+
+            if (out_of_order) {
+                throw std::runtime_error(
+                    "Input VCF is not coordinate-sorted. Offending record: " + chrom + ":" +
+                    std::to_string(pos) + " after " + prev_chrom + ":" + std::to_string(prev_pos));
+            }
+        }
+        prev_chrom = chrom;
+        prev_pos = pos;
+        has_prev_coord = true;
 
         std::string id = rec_->d.id ? rec_->d.id : ".";
         double af = -1.0;
@@ -376,8 +435,8 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
 
         Variant variant;
         variant.id = std::move(id);
-        variant.chrom = bcf_hdr_id2name(hdr_, rec_->rid);
-        variant.pos = rec_->pos + 1;
+        variant.chrom = std::move(chrom);
+        variant.pos = pos;
         variant.ref = rec_->d.allele[0];
         variant.alt = rec_->n_allele > 1 ? rec_->d.allele[1] : ".";
         variant.af = af;

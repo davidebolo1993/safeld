@@ -20,6 +20,8 @@ SAFELD processes VCF files to generate synthetic traits while preserving the lin
 - **Docker Support**: Containerized deployment for reproducibility
 - **Scalable Workflow**: Three-stage pipeline (`preprocess`, `simulate`, `merge`) for large cohorts and high trait counts
 - **Tile Streaming**: Trait tiles are generated and consumed on demand to keep RAM bounded
+- **VCF Compliance**: Chunk outputs include `##contig` header records for downstream tools
+- **Sorted Merge + Indexing**: Merge validates sort order and builds tabix indexes in-house (HTSlib)
 
 ## Installation
 
@@ -77,6 +79,7 @@ SAFELD uses a **three-stage workflow**:
 #### Stage 1: Preprocessing
 
 Generates trait matrix and partitions variants into chunks.
+Input VCF must be coordinate-sorted.
 
 ```bash
 ./safeld preprocess \
@@ -175,6 +178,8 @@ Options:
   -in DIR            Directory with chunk VCF files (required)
   -out FILE          Output merged VCF file (required)
   -no-compress       Don't compress output (default: compressed)
+  -no-index          Don't create tabix index for compressed output
+  -no-sort           Skip sortedness enforcement during merge
   -h, --help         Show this help message
 ```
 
@@ -232,6 +237,7 @@ SAFELD separates preprocessing from simulation for scalability:
 - **OpenBLAS**: Optimized linear algebra operations (cblas_ddot, cblas_dgemm)
 - **OpenMP**: Parallel processing support
 - **BGZF**: Block gzip compression for output
+- **bcftools**: Optional fallback sorting if merged chunks are unexpectedly out of order
 
 ## File Formats
 
@@ -240,6 +246,7 @@ SAFELD separates preprocessing from simulation for scalability:
 - Must contain `DS` (dosage) format field or `GT` (genotype) field
 - Should include `AF` (allele frequency) in INFO field (calculated if missing)
 - Supports both compressed (.vcf.gz) and uncompressed (.vcf) files
+- Must be coordinate-sorted (enforced during preprocessing)
 
 ### Output VCF Structure
 

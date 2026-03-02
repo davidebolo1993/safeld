@@ -4,9 +4,75 @@
 #include <algorithm>
 #include <htslib/bgzf.h>
 #include <htslib/kstring.h>
+#include <htslib/tbx.h>
 #include <dirent.h>
 #include <cstring>
 #include <climits>
+#include <unordered_map>
+#include <string_view>
+#include <cstdlib>
+#include <cstdio>
+
+namespace {
+std::string parseContigId(std::string_view line) {
+    constexpr std::string_view prefix = "##contig=<ID=";
+    if (!line.starts_with(prefix)) {
+        return "";
+    }
+    size_t start = prefix.size();
+    size_t end = line.find_first_of(",>", start);
+    if (end == std::string_view::npos || end <= start) {
+        return "";
+    }
+    return std::string(line.substr(start, end - start));
+}
+
+bool parseChromPos(const char* line, size_t len, std::string& chrom, int& pos) {
+    const char* tab1 = static_cast<const char*>(memchr(line, '\t', len));
+    if (!tab1) {
+        return false;
+    }
+    const char* pos_start = tab1 + 1;
+    size_t remaining = len - static_cast<size_t>(pos_start - line);
+    const char* tab2 = static_cast<const char*>(memchr(pos_start, '\t', remaining));
+    if (!tab2) {
+        return false;
+    }
+
+    chrom.assign(line, static_cast<size_t>(tab1 - line));
+    char* end_ptr = nullptr;
+    long parsed_pos = std::strtol(pos_start, &end_ptr, 10);
+    if (end_ptr != tab2 || parsed_pos < 0 || parsed_pos > INT_MAX) {
+        return false;
+    }
+    pos = static_cast<int>(parsed_pos);
+    return true;
+}
+
+std::string shellEscape(const std::string& value) {
+    std::string escaped = "'";
+    for (char c : value) {
+        if (c == '\'') {
+            escaped += "'\\''";
+        } else {
+            escaped.push_back(c);
+        }
+    }
+    escaped.push_back('\'');
+    return escaped;
+}
+
+bool commandExists(const std::string& command) {
+    std::string probe = "command -v " + command + " >/dev/null 2>&1";
+    return std::system(probe.c_str()) == 0;
+}
+
+void buildTabixIndex(const std::string& vcf_gz_path) {
+    if (tbx_index_build(vcf_gz_path.c_str(), 0, &tbx_conf_vcf) != 0) {
+        throw std::runtime_error("Failed to build tabix index for: " + vcf_gz_path);
+    }
+}
+}  // namespace
 
 VCFMerger::VCFMerger(const MergerConfig& config) : config_(config) {
 }
@@ -60,7 +126,7 @@ std::vector<std::string> VCFMerger::findChunkFiles() {
     return files;
 }
 
-void VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
+bool VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
     Timer timer("Merging VCF chunks");
     
     if (chunk_files.empty()) {
@@ -86,6 +152,12 @@ void VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
     }
     
     bool header_written = false;
+    bool is_sorted = true;
+    bool has_prev_coord = false;
+    std::string prev_chrom;
+    int prev_pos = 0;
+    std::unordered_map<std::string, int> contig_rank;
+    int next_contig_rank = 0;
     kstring_t line = KS_INITIALIZE;
     
     for (size_t chunk_idx = 0; chunk_idx < chunk_files.size(); ++chunk_idx) {
@@ -115,6 +187,10 @@ void VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
                 // Handle header
                 if (line.s[0] == '#') {
                     if (!header_written) {
+                        std::string contig_id = parseContigId(std::string_view(line.s, line.l));
+                        if (!contig_id.empty() && !contig_rank.contains(contig_id)) {
+                            contig_rank[contig_id] = next_contig_rank++;
+                        }
                         if (out_fp) {
                             bgzf_write(out_fp, line.s, line.l);
                             bgzf_write(out_fp, "\n", 1);
@@ -127,6 +203,37 @@ void VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
                 }
                 
                 header_written = true;
+
+                if (config_.enforce_sort) {
+                    std::string chrom;
+                    int pos = 0;
+                    if (parseChromPos(line.s, line.l, chrom, pos)) {
+                        if (has_prev_coord) {
+                            auto rankOf = [&](const std::string& contig) {
+                                auto it = contig_rank.find(contig);
+                                return it == contig_rank.end() ? INT_MAX : it->second;
+                            };
+                            int prev_rank = rankOf(prev_chrom);
+                            int curr_rank = rankOf(chrom);
+
+                            bool out_of_order = false;
+                            if (prev_rank != INT_MAX && curr_rank != INT_MAX) {
+                                out_of_order = (curr_rank < prev_rank) ||
+                                               (curr_rank == prev_rank && pos < prev_pos);
+                            } else if (chrom != prev_chrom) {
+                                out_of_order = chrom < prev_chrom;
+                            } else {
+                                out_of_order = pos < prev_pos;
+                            }
+                            if (out_of_order) {
+                                is_sorted = false;
+                            }
+                        }
+                        prev_chrom = std::move(chrom);
+                        prev_pos = pos;
+                        has_prev_coord = true;
+                    }
+                }
                 
                 // Write variant line
                 if (out_fp) {
@@ -165,6 +272,10 @@ void VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
                 // Handle header
                 if (str_line[0] == '#') {
                     if (!header_written) {
+                        std::string contig_id = parseContigId(str_line);
+                        if (!contig_id.empty() && !contig_rank.contains(contig_id)) {
+                            contig_rank[contig_id] = next_contig_rank++;
+                        }
                         if (out_fp) {
                             bgzf_write(out_fp, str_line.c_str(), str_line.length());
                             bgzf_write(out_fp, "\n", 1);
@@ -176,6 +287,37 @@ void VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
                 }
                 
                 header_written = true;
+
+                if (config_.enforce_sort) {
+                    std::string chrom;
+                    int pos = 0;
+                    if (parseChromPos(str_line.c_str(), str_line.size(), chrom, pos)) {
+                        if (has_prev_coord) {
+                            auto rankOf = [&](const std::string& contig) {
+                                auto it = contig_rank.find(contig);
+                                return it == contig_rank.end() ? INT_MAX : it->second;
+                            };
+                            int prev_rank = rankOf(prev_chrom);
+                            int curr_rank = rankOf(chrom);
+
+                            bool out_of_order = false;
+                            if (prev_rank != INT_MAX && curr_rank != INT_MAX) {
+                                out_of_order = (curr_rank < prev_rank) ||
+                                               (curr_rank == prev_rank && pos < prev_pos);
+                            } else if (chrom != prev_chrom) {
+                                out_of_order = chrom < prev_chrom;
+                            } else {
+                                out_of_order = pos < prev_pos;
+                            }
+                            if (out_of_order) {
+                                is_sorted = false;
+                            }
+                        }
+                        prev_chrom = std::move(chrom);
+                        prev_pos = pos;
+                        has_prev_coord = true;
+                    }
+                }
                 
                 // Write variant line
                 if (out_fp) {
@@ -199,6 +341,56 @@ void VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
     }
     
     logInfo("Merged VCF written to: " + config_.output_file);
+    return is_sorted;
+}
+
+void VCFMerger::finalizeOutput(bool already_sorted) {
+    bool want_index = config_.write_index;
+    if (!config_.compress_output && want_index) {
+        logWarning("Indexing is only supported for compressed output; skipping index generation");
+        want_index = false;
+    }
+
+    bool need_sort = config_.enforce_sort && !already_sorted;
+    bool need_index = want_index && config_.compress_output;
+    if (!need_sort && !need_index) {
+        return;
+    }
+
+    if (need_sort) {
+        if (!commandExists("bcftools")) {
+            throw std::runtime_error(
+                "Merged output is unsorted and bcftools was not found in PATH for fallback sorting");
+        }
+
+        std::string tmp_sorted = config_.output_file + ".tmp.sorted" +
+                                 (config_.compress_output ? ".vcf.gz" : ".vcf");
+        std::string cmd;
+        if (config_.compress_output) {
+            cmd = "bcftools sort -Oz ";
+            cmd += "-o " + shellEscape(tmp_sorted) + " " + shellEscape(config_.output_file);
+        } else {
+            cmd = "bcftools sort -Ov -o " + shellEscape(tmp_sorted) + " " +
+                  shellEscape(config_.output_file);
+        }
+
+        logInfo("Detected unsorted merged output; running: " + cmd);
+        if (std::system(cmd.c_str()) != 0) {
+            throw std::runtime_error("Failed to sort merged VCF with bcftools");
+        }
+
+        if (std::remove(config_.output_file.c_str()) != 0) {
+            throw std::runtime_error("Failed to replace merged output after sorting");
+        }
+        if (std::rename(tmp_sorted.c_str(), config_.output_file.c_str()) != 0) {
+            throw std::runtime_error("Failed to move sorted output into final location");
+        }
+    }
+
+    if (need_index) {
+        logInfo("Indexing merged output with HTSlib tabix");
+        buildTabixIndex(config_.output_file);
+    }
 }
 
 void VCFMerger::run() {
@@ -212,7 +404,11 @@ void VCFMerger::run() {
     
     logInfo("Found " + std::to_string(chunk_files.size()) + " chunk files");
     
-    mergeChunks(chunk_files);
+    bool is_sorted = mergeChunks(chunk_files);
+    if (config_.enforce_sort && !is_sorted) {
+        logWarning("Merged records are not coordinate-sorted; sorting will be applied");
+    }
+    finalizeOutput(is_sorted);
     
     logInfo("VCF merge completed!");
 }

@@ -39,10 +39,12 @@ private:
     
     std::string getTraitsDir() const;
     std::string getChunksDir() const;
+    std::string getHeaderMetaFile() const;
     
     void createOutputDirectories();
     void generateAndSaveTraits();
     void processAndChunkVCF();
+    void saveHeaderMetadata(const std::vector<std::string>& contig_names);
     
     void saveTraitsTiled();
     void saveTraitsMetadata(const TraitsMetadata& meta);

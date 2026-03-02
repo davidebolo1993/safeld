@@ -66,6 +66,25 @@ void ChunkedSimulator::loadTraitsMetadata() {
             std::to_string(traits_meta_.n_tiles) + " tiles");
 }
 
+void ChunkedSimulator::loadHeaderMetadata() {
+    contig_header_lines_.clear();
+    std::string header_file = config_.preprocessed_dir + "/header_contigs.txt";
+    std::ifstream in(header_file);
+    if (!in) {
+        logWarning("Contig header metadata not found: " + header_file);
+        return;
+    }
+
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("##contig=<ID=", 0) == 0) {
+            contig_header_lines_.push_back(line);
+        }
+    }
+
+    logInfo("Loaded " + std::to_string(contig_header_lines_.size()) + " contig header records");
+}
+
 std::vector<double> ChunkedSimulator::loadTraitsTileData(int tile_id, int n_traits) {
     std::string tile_file = config_.preprocessed_dir + "/traits/W_tile_" +
                             std::to_string(tile_id) + ".bin";
@@ -260,6 +279,9 @@ void ChunkedSimulator::writeChunkVCF(int chunk_id, const ChunkMetadata& meta,
         // Write header in smaller pieces
         std::string header = "##fileformat=VCFv4.1\n";
         header += "##source=safeld\n";
+        for (const auto& contig_line : contig_header_lines_) {
+            header += contig_line + "\n";
+        }
         header += "##FORMAT=<ID=DS,Number=1,Type=Float,Description=\"Dosage\">\n";
         bgzf_write(fp, header.c_str(), header.length());
         
@@ -308,6 +330,9 @@ void ChunkedSimulator::writeChunkVCF(int chunk_id, const ChunkMetadata& meta,
         // Write header
         out << "##fileformat=VCFv4.1\n";
         out << "##source=safeld\n";
+        for (const auto& contig_line : contig_header_lines_) {
+            out << contig_line << "\n";
+        }
         out << "##FORMAT=<ID=DS,Number=1,Type=Float,Description=\"Dosage\">\n";
         out << "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT";
         for (int i = 1; i <= traits_meta_.n_traits; i++) {
@@ -340,6 +365,7 @@ void ChunkedSimulator::run() {
     
     // Load metadata once; trait tiles are streamed on demand.
     loadTraitsMetadata();
+    loadHeaderMetadata();
     logInfo("Trait tiles will be streamed on demand during simulation");
 
     // Create output directory

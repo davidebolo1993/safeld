@@ -18,10 +18,12 @@ class ChunkedSimulator {
 private:
     SimulationConfig config_;
     TraitsMetadata traits_meta_;
+    std::vector<std::string> contig_header_lines_;
 
     static constexpr int TRAIT_BATCH_SIZE = 2000;  // Process 2000 traits at a time
 
     void loadTraitsMetadata();
+    void loadHeaderMetadata();
     std::vector<double> loadTraitsTileData(int tile_id, int n_traits);
     
     ChunkMetadata loadChunkMetadata(int chunk_id);

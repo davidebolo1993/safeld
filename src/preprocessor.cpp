@@ -22,6 +22,22 @@ std::string Preprocessor::getChunksDir() const {
     return config_.output_dir + "/chunks";
 }
 
+std::string Preprocessor::getHeaderMetaFile() const {
+    return config_.output_dir + "/header_contigs.txt";
+}
+
+void Preprocessor::saveHeaderMetadata(const std::vector<std::string>& contig_names) {
+    std::ofstream out(getHeaderMetaFile());
+    if (!out) {
+        throw std::runtime_error("Failed to open header metadata file");
+    }
+
+    for (const auto& contig : contig_names) {
+        out << "##contig=<ID=" << contig << ">\n";
+    }
+    logInfo("Saved " + std::to_string(contig_names.size()) + " contig header records");
+}
+
 void Preprocessor::createOutputDirectories() {
     // Create base directory
     if (mkdir(config_.output_dir.c_str(), 0755) != 0 && errno != EEXIST) {
@@ -287,6 +303,7 @@ void Preprocessor::run() {
         throw std::runtime_error("Failed to initialize VCF processor");
     }
     n_samples_ = temp_processor.getTargetSamples().size();
+    saveHeaderMetadata(temp_processor.getContigNames());
 
     // Generate and save traits
     generateAndSaveTraits();

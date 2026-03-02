@@ -17,6 +17,7 @@ void printUsage(const char* program_name) {
     std::cout << "    -chunk-size INT      Variants per chunk (default: 10000)\n";
     std::cout << "    -traits-per-tile INT Traits per tile (default: auto, ~1GB tiles)\n";
     std::cout << "    -h, --help           Show this help message\n\n";
+    std::cout << "  Note: input VCF must be coordinate-sorted.\n\n";
 
     std::cout << "Stage 2 - Simulation:\n";
     std::cout << "  " << program_name << " simulate [OPTIONS]\n";
@@ -33,6 +34,8 @@ void printUsage(const char* program_name) {
     std::cout << "    -in DIR              Directory with chunk VCF files (required)\n";
     std::cout << "    -out FILE            Output merged VCF file\n";
     std::cout << "    -no-compress         Don't compress output (default: compressed)\n";
+    std::cout << "    -no-index            Don't create tabix index for compressed output\n";
+    std::cout << "    -no-sort             Skip sortedness enforcement during merge\n";
     std::cout << "    -h, --help           Show this help message\n\n";
 }
 
@@ -71,6 +74,7 @@ int main(int argc, char* argv[]) {
                     std::cout << "  -chunk-size INT      Variants per chunk (default: 10000)\n";
                     std::cout << "  -traits-per-tile INT Traits per tile (default: auto, ~1GB tiles)\n";
                     std::cout << "  -h, --help           Show this help message\n\n";
+                    std::cout << "Note: input VCF must be coordinate-sorted.\n\n";
                     std::cout << "Examples:\n";
                     std::cout << "  # Auto tile size (recommended)\n";
                     std::cout << "  " << argv[0] << " preprocess -vcf input.vcf.gz -out prep -ntraits 10000\n\n";
@@ -161,6 +165,8 @@ int main(int argc, char* argv[]) {
                     std::cout << "  -in DIR            Directory with chunk VCF files (required)\n";
                     std::cout << "  -out FILE          Output merged VCF file (required)\n";
                     std::cout << "  -no-compress       Don't compress output (default: compressed)\n";
+                    std::cout << "  -no-index          Don't create tabix index for compressed output\n";
+                    std::cout << "  -no-sort           Skip sortedness enforcement during merge\n";
                     std::cout << "  -h, --help         Show this help message\n\n";
                     return 0;
                 }
@@ -171,6 +177,10 @@ int main(int argc, char* argv[]) {
                     config.output_file = argv[++i];
                 } else if (arg == "-no-compress") {
                     config.compress_output = false;
+                } else if (arg == "-no-index") {
+                    config.write_index = false;
+                } else if (arg == "-no-sort") {
+                    config.enforce_sort = false;
                 }
             }
 
