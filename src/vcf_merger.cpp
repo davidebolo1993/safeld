@@ -133,7 +133,7 @@ bool VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
         throw std::runtime_error("No chunk files found");
     }
     
-    logInfo("Merging " + std::to_string(chunk_files.size()) + " chunk files using fast block I/O");
+    logDebug("Merging " + std::to_string(chunk_files.size()) + " chunk files using fast block I/O");
     
     // Open output file
     BGZF* out_fp = nullptr;
@@ -162,8 +162,8 @@ bool VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
     
     for (size_t chunk_idx = 0; chunk_idx < chunk_files.size(); ++chunk_idx) {
         const auto& chunk_file = chunk_files[chunk_idx];
-        logInfo("Processing chunk " + std::to_string(chunk_idx + 1) + "/" + 
-               std::to_string(chunk_files.size()) + ": " + chunk_file);
+        logDebug("Processing chunk " + std::to_string(chunk_idx + 1) + "/" + 
+                std::to_string(chunk_files.size()) + ": " + chunk_file);
         
         BGZF* in_fp = nullptr;
         std::ifstream in_file;
@@ -374,7 +374,8 @@ void VCFMerger::finalizeOutput(bool already_sorted) {
                   shellEscape(config_.output_file);
         }
 
-        logInfo("Detected unsorted merged output; running: " + cmd);
+        logInfo("Detected unsorted merged output; sorting with bcftools");
+        logDebug("Running: " + cmd);
         if (std::system(cmd.c_str()) != 0) {
             throw std::runtime_error("Failed to sort merged VCF with bcftools");
         }
