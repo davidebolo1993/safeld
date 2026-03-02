@@ -221,9 +221,9 @@ std::vector<std::string> VCFProcessor::getContigNames() const {
     }
 
     int nseq = 0;
-    char** seqnames = bcf_hdr_seqnames(hdr_, &nseq);
+    const char** seqnames = bcf_hdr_seqnames(hdr_, &nseq);
     if (!seqnames || nseq <= 0) {
-        free(seqnames);
+        free(const_cast<char**>(seqnames));
         return contigs;
     }
 
@@ -231,7 +231,7 @@ std::vector<std::string> VCFProcessor::getContigNames() const {
     for (int i = 0; i < nseq; ++i) {
         contigs.emplace_back(seqnames[i]);
     }
-    free(seqnames);
+    free(const_cast<char**>(seqnames));
     return contigs;
 }
 
