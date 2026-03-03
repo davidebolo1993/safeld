@@ -39,12 +39,14 @@ private:
     
     std::string getTraitsDir() const;
     std::string getChunksDir() const;
+    std::string getHeaderMetaFile() const;
     
     void createOutputDirectories();
     void generateAndSaveTraits();
     void processAndChunkVCF();
+    void saveHeaderMetadata(const std::vector<std::string>& contig_names);
     
-    void saveTraitsTiled(const std::vector<std::vector<double>>& traits_matrix);
+    void saveTraitsTiled();
     void saveTraitsMetadata(const TraitsMetadata& meta);
     
     void saveChunk(int chunk_id, const std::vector<std::vector<double>>& genotypes,
@@ -58,4 +60,3 @@ public:
     
     void run();
 };
-

@@ -1,227 +1,220 @@
 #include <iostream>
 #include <string>
-#include <vector>
-#include <memory>
-#include <sstream>
-#include <fstream>
-#include <iomanip>
-#include <htslib/bgzf.h>
-#include <cstring>
-#include <cerrno>
-#include "vcf_processor.h"
-#include "simulation_engine.h"
+#include "preprocessor.h"
+#include "chunked_simulator.h"
+#include "vcf_merger.h"
 #include "utils.h"
 
-struct CommandLineArgs {
-    std::string vcf_file;
-    std::string output_file = "SAFE_LD.vcf";
-    std::string sample_list;
-    double maf_filter = 0.01;
-    int n_traits = 10;
-    int n_workers = 0; // 0 = auto-detect
-    bool compress_output = false;
-};
-
 void printUsage(const char* program_name) {
-    std::cout << "Usage: " << program_name << " [OPTIONS]\n\n"
-              << "Options:\n"
-              << "  -vcf FILE        Input VCF file (required, supports .vcf, .vcf.gz)\n"
-              << "  -out FILE        Output VCF file (default: SAFE_LD.vcf)\n"
-              << "  -samples LIST    Comma-separated sample IDs to include\n"
-              << "  -maf FLOAT       Minimum allele frequency filter (default: 0.01)\n"
-              << "  -ntraits INT     Number of synthetic traits (default: 10)\n"
-              << "  -workers INT     Number of worker threads (default: auto-detect)\n"
-              << "  -compress        Compress output (bgzip)\n"
-              << "  -h, --help       Show this help message\n\n";
-}
+    std::cout << "SAFELD - Three-stage workflow\n\n";
+    std::cout << "Stage 1 - Preprocessing:\n";
+    std::cout << "  " << program_name << " preprocess [OPTIONS]\n";
+    std::cout << "    -vcf FILE            Input VCF file (required)\n";
+    std::cout << "    -out DIR             Output directory for preprocessed data\n";
+    std::cout << "    -samples LIST        Comma-separated sample IDs\n";
+    std::cout << "    -maf FLOAT           MAF filter (default: 0.01)\n";
+    std::cout << "    -ntraits INT         Number of traits (default: 10)\n";
+    std::cout << "    -chunk-size INT      Variants per chunk (default: 10000)\n";
+    std::cout << "    -traits-per-tile INT Traits per tile (default: auto, ~1GB tiles)\n";
+    std::cout << "    -h, --help           Show this help message\n\n";
+    std::cout << "Global options:\n";
+    std::cout << "    -verbose             Enable detailed debug logging\n\n";
+    std::cout << "  Note: input VCF must be coordinate-sorted.\n\n";
 
-CommandLineArgs parseCommandLine(int argc, char* argv[]) {
-    CommandLineArgs args;
-    
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        
-        if (arg == "-h" || arg == "--help") {
-            printUsage(argv[0]);
-            exit(0);
-        } else if (arg == "-vcf" && i + 1 < argc) {
-            args.vcf_file = argv[++i];
-        } else if (arg == "-out" && i + 1 < argc) {
-            args.output_file = argv[++i];
-        } else if (arg == "-samples" && i + 1 < argc) {
-            args.sample_list = argv[++i];
-        } else if (arg == "-maf" && i + 1 < argc) {
-            args.maf_filter = std::stod(argv[++i]);
-        } else if (arg == "-ntraits" && i + 1 < argc) {
-            args.n_traits = std::stoi(argv[++i]);
-        } else if (arg == "-workers" && i + 1 < argc) {
-            args.n_workers = std::stoi(argv[++i]);
-        } else if (arg == "-compress") {
-            args.compress_output = true;
-        }
-    }
-    
-    return args;
-}
+    std::cout << "Stage 2 - Simulation:\n";
+    std::cout << "  " << program_name << " simulate [OPTIONS]\n";
+    std::cout << "    -prep DIR            Preprocessed data directory (required)\n";
+    std::cout << "    -out DIR             Output directory for results\n";
+    std::cout << "    -workers INT         Number of threads (default: auto)\n";
+    std::cout << "    -variant-batch-size INT Variants per simulation batch (default: 4000)\n";
+    std::cout << "    -compress            Compress output\n";
+    std::cout << "    -start-chunk INT     First chunk to process (default: all)\n";
+    std::cout << "    -end-chunk INT       Last chunk to process (default: all)\n";
+    std::cout << "    -h, --help           Show this help message\n\n";
 
-void writeVCFHeader(std::ostream& out, int n_traits) {
-    out << "##fileformat=VCFv4.1\n";
-    out << "##source=safeld-cpp\n";
-    out << "##FORMAT=<ID=DS,Number=1,Type=Float,Description=\"Dosage\">\n";
-    out << "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT";
-    for (int i = 1; i <= n_traits; ++i) {
-        out << "\tT" << i;
-    }
-    out << "\n";
-}
-
-void writeVariant(std::ostream& out, const ProcessedVariant& variant) {
-    out << variant.chrom << '\t'
-        << variant.pos << '\t'
-        << variant.id << '\t'
-        << variant.ref << '\t'
-        << variant.alt << '\t'
-        << ".\tPASS\t.\tDS";
-    
-    for (double dosage : variant.synthetic_dosages) {
-        out << '\t' << std::fixed << std::setprecision(4) << dosage;
-    }
-    out << '\n';
-}
-
-bool writeResults(const std::string& output_file, const std::vector<ProcessedVariant>& results,
-                 int n_traits, bool compress) {
-    Timer timer("Writing results");
-    logInfo("Writing " + std::to_string(results.size()) + " variants to: " + output_file);
-    
-    if (compress || output_file.ends_with(".gz")) {
-        // Use bgzf for compressed output
-        BGZF* fp = bgzf_open(output_file.c_str(), "w");
-        if (!fp) {
-            logError("Failed to open output file for writing: " + output_file);
-            logError("Check disk space and file permissions");
-            return false;
-        }
-        
-        // Write header
-        std::ostringstream header;
-        writeVCFHeader(header, n_traits);
-        std::string header_str = header.str();
-        ssize_t written = bgzf_write(fp, header_str.c_str(), header_str.length());
-        if (written != static_cast<ssize_t>(header_str.length())) {
-            logError("Failed to write VCF header: " + std::string(strerror(errno)));
-            bgzf_close(fp);
-            return false;
-        }
-        
-        // Write variants with error checking
-        for (size_t i = 0; i < results.size(); ++i) {
-            std::ostringstream line;
-            writeVariant(line, results[i]);
-            std::string line_str = line.str();
-            written = bgzf_write(fp, line_str.c_str(), line_str.length());
-            if (written != static_cast<ssize_t>(line_str.length())) {
-                logError("Failed to write variant " + std::to_string(i) + ": " + std::string(strerror(errno)));
-                bgzf_close(fp);
-                return false;
-            }
-            
-            if (i % 10000 == 0 && i > 0) {
-                logInfo("Written " + std::to_string(i) + " variants...");
-            }
-        }
-        
-        if (bgzf_close(fp) != 0) {
-            logError("Failed to close output file properly: " + std::string(strerror(errno)));
-            return false;
-        }
-        
-    } else {
-        // Regular file output with better error handling
-        std::ofstream out(output_file);
-        if (!out) {
-            logError("Failed to open output file for writing: " + output_file);
-            logError("Error: " + std::string(strerror(errno)));
-            return false;
-        }
-        
-        writeVCFHeader(out, n_traits);
-        if (!out.good()) {
-            logError("Failed to write VCF header");
-            return false;
-        }
-        
-        for (size_t i = 0; i < results.size(); ++i) {
-            writeVariant(out, results[i]);
-            if (!out.good()) {
-                logError("Failed to write variant " + std::to_string(i));
-                return false;
-            }
-            
-            if (i % 10000 == 0 && i > 0) {
-                logInfo("Written " + std::to_string(i) + " variants...");
-            }
-        }
-    }
-    
-    logInfo("Results written successfully to: " + output_file);
-    return true;
+    std::cout << "Stage 3 - Merge:\n";
+    std::cout << "  " << program_name << " merge [OPTIONS]\n";
+    std::cout << "    -in DIR              Directory with chunk VCF files (required)\n";
+    std::cout << "    -out FILE            Output merged VCF file\n";
+    std::cout << "    -no-compress         Don't compress output (default: compressed)\n";
+    std::cout << "    -no-index            Don't create tabix index for compressed output\n";
+    std::cout << "    -no-sort             Skip sortedness enforcement during merge\n";
+    std::cout << "    -h, --help           Show this help message\n\n";
 }
 
 int main(int argc, char* argv[]) {
     try {
-        // Parse command line arguments (handles help before any initialization)
-        CommandLineArgs args = parseCommandLine(argc, argv);
-        
-        if (args.vcf_file.empty()) {
-            logError("VCF file is required. Use -h for help.");
+        if (argc < 2) {
+            printUsage(argv[0]);
             return 1;
         }
-        
-        // Now that we're past help, initialize logging
-        logInfo("Vector pool initialized with max size: 2000");
-        logInfo("Starting SAFE_LD simulation...");
-        logInfo("Input VCF: " + args.vcf_file);
-        logInfo("Output file: " + args.output_file);
-        logInfo("MAF filter: " + std::to_string(args.maf_filter));
-        logInfo("Number of traits: " + std::to_string(args.n_traits));
-        
-        // Step 1: Process VCF
-        VCFProcessor processor(args.vcf_file, args.maf_filter);
-        if (!processor.initialize(args.sample_list)) {
-            logError("Failed to initialize VCF processor");
+
+        std::string mode = argv[1];
+
+        if (mode == "-h" || mode == "--help" || mode == "help") {
+            printUsage(argv[0]);
+            return 0;
+        }
+
+        bool verbose_logs = false;
+        for (int i = 1; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "-verbose") {
+                verbose_logs = true;
+            }
+        }
+        setVerboseLogging(verbose_logs);
+
+        logInfo("SAFELD initialized");
+
+        if (mode == "preprocess") {
+            PreprocessConfig config;
+
+            for (int i = 2; i < argc; ++i) {
+                std::string arg = argv[i];
+                if (arg == "-h" || arg == "--help") {
+                    std::cout << "SAFELD Preprocessing\n\n";
+                    std::cout << "Usage: " << argv[0] << " preprocess [OPTIONS]\n\n";
+                    std::cout << "Options:\n";
+                    std::cout << "  -vcf FILE            Input VCF file (required)\n";
+                    std::cout << "  -out DIR             Output directory for preprocessed data (required)\n";
+                    std::cout << "  -samples LIST        Comma-separated sample IDs\n";
+                    std::cout << "  -maf FLOAT           MAF filter (default: 0.01)\n";
+                    std::cout << "  -ntraits INT         Number of traits (default: 10)\n";
+                    std::cout << "  -chunk-size INT      Variants per chunk (default: 10000)\n";
+                    std::cout << "  -traits-per-tile INT Traits per tile (default: auto, ~1GB tiles)\n";
+                    std::cout << "  -h, --help           Show this help message\n\n";
+                    std::cout << "Note: input VCF must be coordinate-sorted.\n\n";
+                    return 0;
+                }
+
+                if (arg == "-vcf" && i + 1 < argc) {
+                    config.vcf_file = argv[++i];
+                } else if (arg == "-out" && i + 1 < argc) {
+                    config.output_dir = argv[++i];
+                } else if (arg == "-samples" && i + 1 < argc) {
+                    config.sample_list = argv[++i];
+                } else if (arg == "-maf" && i + 1 < argc) {
+                    config.maf_filter = std::stod(argv[++i]);
+                } else if (arg == "-ntraits" && i + 1 < argc) {
+                    config.n_traits = std::stoi(argv[++i]);
+                } else if (arg == "-chunk-size" && i + 1 < argc) {
+                    config.chunk_size = std::stoi(argv[++i]);
+                } else if (arg == "-traits-per-tile" && i + 1 < argc) {
+                    config.traits_per_tile = std::stoi(argv[++i]);
+                }
+            }
+
+            if (config.vcf_file.empty() || config.output_dir.empty()) {
+                logError("VCF file and output directory are required");
+                std::cout << "\nUse: " << argv[0] << " preprocess --help for usage information\n";
+                return 1;
+            }
+
+            Preprocessor preprocessor(config);
+            preprocessor.run();
+
+        } else if (mode == "simulate") {
+            SimulationConfig config;
+
+            for (int i = 2; i < argc; ++i) {
+                std::string arg = argv[i];
+                if (arg == "-h" || arg == "--help") {
+                    std::cout << "SAFELD Simulation\n\n";
+                    std::cout << "Usage: " << argv[0] << " simulate [OPTIONS]\n\n";
+                    std::cout << "Options:\n";
+                    std::cout << "  -prep DIR          Preprocessed data directory (required)\n";
+                    std::cout << "  -out DIR           Output directory for results (required)\n";
+                    std::cout << "  -workers INT       Number of threads (default: auto-detect)\n";
+                    std::cout << "  -variant-batch-size INT Variants per simulation batch (default: 4000)\n";
+                    std::cout << "  -compress          Compress output VCF chunks\n";
+                    std::cout << "  -start-chunk INT   First chunk to process (default: all)\n";
+                    std::cout << "  -end-chunk INT     Last chunk to process (default: all)\n";
+                    std::cout << "  -h, --help         Show this help message\n\n";
+                    return 0;
+                }
+
+                if (arg == "-prep" && i + 1 < argc) {
+                    config.preprocessed_dir = argv[++i];
+                } else if (arg == "-out" && i + 1 < argc) {
+                    config.output_dir = argv[++i];
+                } else if (arg == "-workers" && i + 1 < argc) {
+                    config.n_workers = std::stoi(argv[++i]);
+                } else if (arg == "-variant-batch-size" && i + 1 < argc) {
+                    config.variant_batch_size = std::stoi(argv[++i]);
+                } else if (arg == "-compress") {
+                    config.compress_output = true;
+                } else if (arg == "-start-chunk" && i + 1 < argc) {
+                    config.start_chunk = std::stoi(argv[++i]);
+                } else if (arg == "-end-chunk" && i + 1 < argc) {
+                    config.end_chunk = std::stoi(argv[++i]);
+                }
+            }
+
+            if (config.preprocessed_dir.empty() || config.output_dir.empty()) {
+                logError("Preprocessed directory and output directory are required");
+                std::cout << "\nUse: " << argv[0] << " simulate --help for usage information\n";
+                return 1;
+            }
+            if (config.variant_batch_size <= 0) {
+                logError("variant-batch-size must be > 0");
+                return 1;
+            }
+
+            ChunkedSimulator simulator(config);
+            simulator.run();
+
+        } else if (mode == "merge") {
+            MergerConfig config;
+            config.compress_output = true;
+
+            for (int i = 2; i < argc; ++i) {
+                std::string arg = argv[i];
+                if (arg == "-h" || arg == "--help") {
+                    std::cout << "SAFELD Merge\n\n";
+                    std::cout << "Usage: " << argv[0] << " merge [OPTIONS]\n\n";
+                    std::cout << "Options:\n";
+                    std::cout << "  -in DIR            Directory with chunk VCF files (required)\n";
+                    std::cout << "  -out FILE          Output merged VCF file (required)\n";
+                    std::cout << "  -no-compress       Don't compress output (default: compressed)\n";
+                    std::cout << "  -no-index          Don't create tabix index for compressed output\n";
+                    std::cout << "  -no-sort           Skip sortedness enforcement during merge\n";
+                    std::cout << "  -h, --help         Show this help message\n\n";
+                    return 0;
+                }
+
+                if (arg == "-in" && i + 1 < argc) {
+                    config.input_dir = argv[++i];
+                } else if (arg == "-out" && i + 1 < argc) {
+                    config.output_file = argv[++i];
+                } else if (arg == "-no-compress") {
+                    config.compress_output = false;
+                } else if (arg == "-no-index") {
+                    config.write_index = false;
+                } else if (arg == "-no-sort") {
+                    config.enforce_sort = false;
+                }
+            }
+
+            if (config.input_dir.empty() || config.output_file.empty()) {
+                logError("Input directory and output file are required");
+                std::cout << "\nUse: " << argv[0] << " merge --help for usage information\n";
+                return 1;
+            }
+
+            VCFMerger merger(config);
+            merger.run();
+
+        } else {
+            logError("Unknown mode: " + mode);
+            std::cout << "\nUse: " << argv[0] << " --help for usage information\n";
             return 1;
         }
-        
-        auto variants = processor.processVariants();
-        if (variants.empty()) {
-            logError("No variants passed filtering");
-            return 1;
-        }
-        
-        int n_samples = processor.getTargetSamples().size();
-        
-        // Step 2: Initialize simulation engine
-        SimulationEngine engine(args.n_traits, n_samples, args.n_workers);
-        engine.initialize();
-        
-        // Step 3: Run simulation (using original method)
-        auto results = engine.simulateVariants(variants);
-        
-        // Step 4: Write results
-        if (!writeResults(args.output_file, results, args.n_traits, args.compress_output)) {
-            return 1;
-        }
-        
-        logInfo("SAFE_LD simulation completed successfully!");
-        logInfo("Processed " + std::to_string(variants.size()) + " variants with " +
-                std::to_string(n_samples) + " samples");
-        
+
         return 0;
-        
+
     } catch (const std::exception& e) {
         logError("Error: " + std::string(e.what()));
         return 1;
     }
 }
-

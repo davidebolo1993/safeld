@@ -5,13 +5,30 @@
 #include <numeric>
 #include <cmath>
 #include <mutex>
+#include <atomic>
 
-// Thread-safe logging
 static std::mutex log_mutex;
+static std::atomic<bool> verbose_logging{false};
+
+void setVerboseLogging(bool enabled) {
+    verbose_logging.store(enabled);
+}
+
+bool isVerboseLogging() {
+    return verbose_logging.load();
+}
 
 void logInfo(const std::string& message) {
     std::lock_guard<std::mutex> lock(log_mutex);
     std::cout << "[INFO] " << message << std::endl;
+}
+
+void logDebug(const std::string& message) {
+    if (!verbose_logging.load()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(log_mutex);
+    std::cout << "[DEBUG] " << message << std::endl;
 }
 
 void logWarning(const std::string& message) {
@@ -24,7 +41,6 @@ void logError(const std::string& message) {
     std::cerr << "[ERROR] " << message << std::endl;
 }
 
-// String utilities
 std::vector<std::string> split(const std::string& str, char delimiter) {
     std::vector<std::string> tokens;
     std::stringstream ss(str);
@@ -45,17 +61,14 @@ double parseDouble(const std::string& str, double defaultValue) {
     }
 }
 
-// Statistical functions
 std::vector<double> standardize(const std::vector<double>& data) {
     if (data.empty()) {
         return {};
     }
     
-    // Calculate mean
     double sum = std::accumulate(data.begin(), data.end(), 0.0);
     double mean = sum / data.size();
     
-    // Calculate standard deviation
     double sq_sum = 0.0;
     for (double value : data) {
         sq_sum += (value - mean) * (value - mean);
@@ -66,7 +79,6 @@ std::vector<double> standardize(const std::vector<double>& data) {
         return std::vector<double>(data.size(), 0.0);
     }
     
-    // Standardize
     std::vector<double> standardized;
     standardized.reserve(data.size());
     
@@ -82,17 +94,15 @@ std::vector<double> scaleToDosageRange(const std::vector<double>& data) {
         return {};
     }
     
-    // Find min and max
     auto minmax = std::minmax_element(data.begin(), data.end());
     double min_val = *minmax.first;
     double max_val = *minmax.second;
     
     double range = max_val - min_val;
     if (range == 0.0) {
-        return std::vector<double>(data.size(), 1.0); // Default to middle of [0, 2]
+        return std::vector<double>(data.size(), 1.0);
     }
     
-    // Scale to [0, 2] range
     std::vector<double> scaled;
     scaled.reserve(data.size());
     
@@ -104,14 +114,13 @@ std::vector<double> scaleToDosageRange(const std::vector<double>& data) {
     return scaled;
 }
 
-// Timer implementation
 Timer::Timer(const std::string& timer_name) : name(timer_name) {
     reset();
 }
 
 Timer::~Timer() {
     double elapsed_time = elapsed();
-    logInfo(name + " completed in " + std::to_string(elapsed_time) + " seconds");
+    logDebug(name + " completed in " + std::to_string(elapsed_time) + " seconds");
 }
 
 void Timer::reset() {
@@ -121,6 +130,5 @@ void Timer::reset() {
 double Timer::elapsed() const {
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
-    return duration.count() / 1000000.0; // Convert to seconds
+    return duration.count() / 1000000.0;
 }
-

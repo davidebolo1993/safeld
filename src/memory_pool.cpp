@@ -4,10 +4,7 @@
 VectorPool g_vector_pool(2000);
 
 VectorPool::VectorPool(size_t max_size) : max_size_(max_size) {
-    // Silent initialization - no logging here
 }
-
-// NO DESTRUCTOR - let compiler generate default one
 
 std::vector<double> VectorPool::acquireDoubleVector(size_t reserve_size) {
     std::lock_guard<std::mutex> lock(double_mutex_);
@@ -86,4 +83,3 @@ std::vector<std::string> acquireStringVector(size_t reserve_size) {
 void releaseStringVector(std::vector<std::string>&& vec) {
     g_vector_pool.releaseStringVector(std::move(vec));
 }
-

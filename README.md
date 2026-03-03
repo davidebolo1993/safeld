@@ -1,6 +1,6 @@
-# SAFELD - SAFE LD Simulator
+# SAFELD
 
-A high-performance C++ implementation of the SAFE LD (Linkage Disequilibrium) simulator for generating synthetic genomic data from VCF files.
+A high-performance C++ implementation of the SAFE-LD (Shrinkage and Anonymization Framework for LD Estimation) method for generating synthetic genomic data from VCF files.
 
 ## Overview
 
@@ -18,9 +18,9 @@ SAFELD processes VCF files to generate synthetic traits while preserving the lin
 - **Flexible Input**: Supports compressed and uncompressed VCF files
 - **HTSlib Integration**: Robust VCF parsing using industry-standard library
 - **Docker Support**: Containerized deployment for reproducibility
-- **Two Operational Modes**: 
-  - Standard mode for typical datasets
-  - Chunked mode for very large datasets (>100K samples or high trait counts)
+- **Scalable Workflow**: Three-stage pipeline (`preprocess`, `simulate`, `merge`) for large cohorts and high trait counts
+- **Tile Streaming**: Trait tiles are generated and consumed on demand to keep RAM bounded
+- **Configurable Batching**: Simulation variant batch size is tunable via CLI
 
 ## Installation
 
@@ -45,9 +45,8 @@ cmake ..
 make -j $(nproc)
 ```
 
-This builds two executables:
-- `safeld` - Standard mode (fast, in-memory processing)
-- `safeld_chunked` - Chunked mode (memory-efficient, scalable to very large datasets)
+This builds one executable:
+- `safeld`
 
 ### Manual Installation
 
@@ -66,59 +65,36 @@ make -j $(nproc)
 # Build Docker image
 docker build -t safeld .
 
-# Run with Docker
-docker run --rm -v $(pwd):/data safeld -vcf /data/input.vcf.gz -out /data/output.vcf.gz -compress
+# Run with Docker (example: stage 1 preprocess)
+docker run --rm -v $(pwd):/data safeld preprocess -vcf /data/input.vcf.gz -out /data/prep
 ```
 
 ## Usage
 
-### Standard Mode (Recommended for most use cases)
+### Three-Stage Workflow
 
-```bash
-# Basic usage with VCF
-./safeld -vcf input.vcf -out output.vcf
+SAFELD uses a **three-stage workflow**:
 
-# Compressed VCF with custom parameters
-./safeld -vcf input.vcf.gz -out output.vcf.gz -compress -ntraits 5000 -maf 0.01
-```
-
-**Standard Mode Options:**
-
-```txt
-./safeld [OPTIONS]
-
-Options:
-  -vcf FILE        Input VCF file (required, supports .vcf, .vcf.gz)
-  -out FILE        Output VCF file (default: SAFE_LD.vcf)
-  -samples LIST    Comma-separated sample IDs to include
-  -maf FLOAT       Minimum allele frequency filter (default: 0.01)
-  -ntraits INT     Number of synthetic traits (default: 10)
-  -workers INT     Number of worker threads (default: auto-detect)
-  -compress        Compress output (bgzip)
-  -h, --help       Show help message
-```
-
-### Chunked Mode (For very large datasets)
-
-The chunked mode uses a **three-stage workflow**:
+Global option:
+- `-verbose` Enable detailed debug logging
 
 #### Stage 1: Preprocessing
 
 Generates trait matrix and partitions variants into chunks.
+Input VCF must be coordinate-sorted.
 
 ```bash
-./safeld_chunked preprocess \
+./safeld preprocess \
   -vcf input.vcf.gz \
   -out preprocessed_data \
-  -ntraits 10000 \
-  -chunk-size 5000 \
+  -ntraits 5000 \
   -maf 0.01
 ```
 
 **Preprocessing Options:**
 
 ```txt
-./safeld_chunked preprocess [OPTIONS]
+./safeld preprocess [OPTIONS]
 
 Options:
   -vcf FILE            Input VCF file (required)
@@ -134,6 +110,7 @@ Options:
 **Output structure:**
 ```
 preprocessed_data/
+├── header_contigs.txt    # Serialized ##contig header lines
 ├── traits/
 │   ├── W_tile_0.bin      # Trait matrix (tiled if large)
 │   ├── W_tile_1.bin
@@ -152,14 +129,14 @@ Processes chunks to generate synthetic traits. Each chunk uses all available cor
 
 ```bash
 # Process all chunks sequentially
-./safeld_chunked simulate \
+./safeld simulate \
   -prep preprocessed_data \
   -out results \
   -workers 32 \
   -compress
 
 # Process specific chunk range (useful for cluster parallelization)
-./safeld_chunked simulate \
+./safeld simulate \
   -prep preprocessed_data \
   -out results \
   -start-chunk 0 \
@@ -171,12 +148,13 @@ Processes chunks to generate synthetic traits. Each chunk uses all available cor
 **Simulation Options:**
 
 ```txt
-./safeld_chunked simulate [OPTIONS]
+./safeld simulate [OPTIONS]
 
 Options:
   -prep DIR          Preprocessed data directory (required)
   -out DIR           Output directory for results (required)
   -workers INT       Number of threads (default: auto-detect)
+  -variant-batch-size INT Variants per simulation batch (default: 4000)
   -compress          Compress output VCF chunks
   -start-chunk INT   First chunk to process (default: all)
   -end-chunk INT     Last chunk to process (default: all)
@@ -187,9 +165,11 @@ Options:
 #### Stage 3: Merge
 
 Combines all chunk VCF files into a single output file.
+When output is compressed, a `.tbi` index is created by default.
+If merged chunks are unexpectedly unsorted, merge falls back to `bcftools sort`.
 
 ```bash
-./safeld_chunked merge \
+./safeld merge \
   -in results \
   -out final_output.vcf.gz
 ```
@@ -197,57 +177,20 @@ Combines all chunk VCF files into a single output file.
 **Merge Options:**
 
 ```txt
-./safeld_chunked merge [OPTIONS]
+./safeld merge [OPTIONS]
 
 Options:
   -in DIR            Directory with chunk VCF files (required)
   -out FILE          Output merged VCF file (required)
   -no-compress       Don't compress output (default: compressed)
+  -no-index          Don't create tabix index for compressed output
+  -no-sort           Skip sortedness enforcement during merge
   -h, --help         Show this help message
-```
-
-### Complete Chunked Workflow Example
-
-```bash
-# 1. Preprocess (one time per dataset)
-./safeld_chunked preprocess \
-  -vcf large_dataset.vcf.gz \
-  -out preprocessed_chr22 \
-  -ntraits 10000 \
-  -chunk-size 5000 \
-  -maf 0.01
-
-# 2. Simulate (can be parallelized)
-./safeld_chunked simulate \
-  -prep preprocessed_chr22 \
-  -out results_chr22 \
-  -workers 32 \
-  -compress
-
-# 3. Merge
-./safeld_chunked merge \
-  -in results_chr22 \
-  -out chr22_final.vcf.gz
 ```
 
 ## Algorithm
 
-### Standard Mode Algorithm
-
-SAFELD implements a sophisticated simulation algorithm:
-
-1. **VCF Processing**: Parses input VCF and applies MAF filtering
-2. **Duplicate Removal**: Removes duplicate variants from filtered set
-3. **Traits Generation**: Creates synthetic traits matrix using random normal distribution
-4. **Variant Simulation**: 
-   - Standardizes original dosages per variant
-   - Computes synthetic dosages via matrix multiplication with BLAS operations
-   - Scales results to valid dosage range [0, 2]
-5. **Output Generation**: Writes synthetic VCF with preserved structure
-
-### Chunked Mode Algorithm
-
-The chunked mode separates preprocessing from simulation for scalability:
+SAFELD separates preprocessing from simulation for scalability:
 
 **Preprocessing Stage:**
 1. Parse VCF once and apply MAF filtering
@@ -256,10 +199,11 @@ The chunked mode separates preprocessing from simulation for scalability:
 4. Serialize traits (tiled if large) and genotype chunks to disk
 
 **Simulation Stage:**
-1. Load trait matrix W into memory once
+1. Load trait metadata once
 2. For each chunk:
    - Load standardized genotypes G (B × S)
-   - Compute Y = G × W^T using optimized BLAS GEMM
+   - Process variants in configurable batches (`-variant-batch-size`)
+   - Stream trait tiles and compute Y = G × W^T using optimized BLAS GEMM
    - Scale synthetic dosages to [0, 2] range
    - Write chunk VCF to disk
 3. Release chunk memory before processing next
@@ -275,6 +219,7 @@ The chunked mode separates preprocessing from simulation for scalability:
 - **OpenBLAS**: Optimized linear algebra operations (cblas_ddot, cblas_dgemm)
 - **OpenMP**: Parallel processing support
 - **BGZF**: Block gzip compression for output
+- **bcftools**: Optional fallback sorting if merged chunks are unexpectedly out of order
 
 ## File Formats
 
@@ -283,18 +228,20 @@ The chunked mode separates preprocessing from simulation for scalability:
 - Must contain `DS` (dosage) format field or `GT` (genotype) field
 - Should include `AF` (allele frequency) in INFO field (calculated if missing)
 - Supports both compressed (.vcf.gz) and uncompressed (.vcf) files
+- Must be coordinate-sorted (enforced during preprocessing)
 
 ### Output VCF Structure
 
 ```txt
 ##fileformat=VCFv4.1
-##source=safeld-cpp
+##source=safeld
+##contig=<ID=22>
 ##FORMAT=<ID=DS,Number=1,Type=Float,Description="Dosage">
 #CHROM  POS     ID      REF  ALT  QUAL  FILTER  INFO  FORMAT  T1    T2    ...
 chr1    1000    rs123   A    G    .     PASS    .     DS      1.23  0.45  ...
 ```
 
-### Chunked Mode Binary Formats
+### Binary Formats
 
 **Trait Matrix Tiles** (`W_tile_*.bin`):
 - Row-major double-precision matrix
@@ -316,8 +263,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Citation
 
-If you use SAFELD in your research, please cite:
-[Citation to be added]
+If you use SAFELD in your research, please cite our [preprint](https://doi.org/10.1101/2025.09.29.679154).
 
 ## Contributing
 

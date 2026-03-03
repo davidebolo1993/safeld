@@ -1,9 +1,102 @@
 #include "vcf_processor.h"
 #include "utils.h"
 #include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <fstream>
 #include <sstream>
 #include <cmath>
 #include <cstring>
+#include <climits>
+#include <unistd.h>
+
+namespace {
+struct SpoolRecordHeader {
+    uint8_t keep;
+    int32_t pos;
+    double af;
+    uint32_t id_len;
+    uint32_t chrom_len;
+    uint32_t ref_len;
+    uint32_t alt_len;
+    uint32_t dosages_count;
+};
+
+struct IdState {
+    std::streamoff keep_offset = -1;
+    int count = 0;
+    bool has_spooled_record = false;
+};
+
+struct TempFileGuard {
+    std::string path;
+    ~TempFileGuard() {
+        if (!path.empty()) {
+            std::remove(path.c_str());
+        }
+    }
+};
+
+void writeSpoolRecord(std::fstream& file, const Variant& variant, std::streamoff& keep_offset) {
+    keep_offset = file.tellp();
+
+    SpoolRecordHeader header{};
+    header.keep = 1;
+    header.pos = static_cast<int32_t>(variant.pos);
+    header.af = variant.af;
+    header.id_len = static_cast<uint32_t>(variant.id.size());
+    header.chrom_len = static_cast<uint32_t>(variant.chrom.size());
+    header.ref_len = static_cast<uint32_t>(variant.ref.size());
+    header.alt_len = static_cast<uint32_t>(variant.alt.size());
+    header.dosages_count = static_cast<uint32_t>(variant.dosages.size());
+
+    file.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    file.write(variant.id.data(), static_cast<std::streamsize>(variant.id.size()));
+    file.write(variant.chrom.data(), static_cast<std::streamsize>(variant.chrom.size()));
+    file.write(variant.ref.data(), static_cast<std::streamsize>(variant.ref.size()));
+    file.write(variant.alt.data(), static_cast<std::streamsize>(variant.alt.size()));
+    file.write(reinterpret_cast<const char*>(variant.dosages.data()),
+               static_cast<std::streamsize>(variant.dosages.size() * sizeof(double)));
+
+    if (!file) {
+        throw std::runtime_error("Failed writing temporary deduplication spool record");
+    }
+}
+
+bool readSpoolRecord(std::fstream& file, uint8_t& keep, Variant& variant) {
+    SpoolRecordHeader header{};
+    file.read(reinterpret_cast<char*>(&header), sizeof(header));
+
+    if (file.eof()) {
+        return false;
+    }
+    if (!file) {
+        throw std::runtime_error("Failed reading temporary deduplication spool header");
+    }
+
+    keep = header.keep;
+    variant.pos = header.pos;
+    variant.af = header.af;
+    variant.id.resize(header.id_len);
+    variant.chrom.resize(header.chrom_len);
+    variant.ref.resize(header.ref_len);
+    variant.alt.resize(header.alt_len);
+    variant.dosages.resize(header.dosages_count);
+
+    file.read(variant.id.data(), static_cast<std::streamsize>(variant.id.size()));
+    file.read(variant.chrom.data(), static_cast<std::streamsize>(variant.chrom.size()));
+    file.read(variant.ref.data(), static_cast<std::streamsize>(variant.ref.size()));
+    file.read(variant.alt.data(), static_cast<std::streamsize>(variant.alt.size()));
+    file.read(reinterpret_cast<char*>(variant.dosages.data()),
+              static_cast<std::streamsize>(variant.dosages.size() * sizeof(double)));
+
+    if (!file) {
+        throw std::runtime_error("Failed reading temporary deduplication spool record body");
+    }
+
+    return true;
+}
+}  // namespace
 
 VCFProcessor::VCFProcessor(const std::string& vcf_file, double maf_filter)
     : vcf_file_(vcf_file), maf_filter_(maf_filter), vcf_fp_(nullptr),
@@ -59,7 +152,7 @@ bool VCFProcessor::parseHeader() {
         return false;
     }
 
-    logInfo("Found " + std::to_string(n_samples) + " samples in VCF");
+    logDebug("Found " + std::to_string(n_samples) + " samples in VCF");
     return true;
 }
 
@@ -67,7 +160,6 @@ void VCFProcessor::setupTargetSamples(const std::string& sample_list_str) {
     int n_samples = bcf_hdr_nsamples(hdr_);
 
     if (sample_list_str.empty()) {
-        // Use all samples
         target_samples_.reserve(n_samples);
         sample_indices_.reserve(n_samples);
         for (int i = 0; i < n_samples; ++i) {
@@ -75,7 +167,6 @@ void VCFProcessor::setupTargetSamples(const std::string& sample_list_str) {
             sample_indices_.push_back(i);
         }
     } else {
-        // Parse requested samples
         auto requested_samples = split(sample_list_str, ',');
         std::unordered_map<std::string, int> sample_map;
         for (int i = 0; i < n_samples; ++i) {
@@ -84,7 +175,6 @@ void VCFProcessor::setupTargetSamples(const std::string& sample_list_str) {
 
         for (const auto& sample : requested_samples) {
             std::string trimmed = sample;
-            // Trim whitespace
             trimmed.erase(0, trimmed.find_first_not_of(" \t"));
             trimmed.erase(trimmed.find_last_not_of(" \t") + 1);
 
@@ -95,8 +185,8 @@ void VCFProcessor::setupTargetSamples(const std::string& sample_list_str) {
             }
         }
 
-        logInfo("Found " + std::to_string(target_samples_.size()) + " of " +
-                std::to_string(requested_samples.size()) + " requested samples");
+        logDebug("Found " + std::to_string(target_samples_.size()) + " of " +
+                 std::to_string(requested_samples.size()) + " requested samples");
     }
 }
 
@@ -117,22 +207,40 @@ bool VCFProcessor::initialize(const std::string& sample_list_str) {
         return false;
     }
 
-    logInfo("VCF processor initialized with " + std::to_string(target_samples_.size()) + " samples");
+    logDebug("VCF processor initialized with " + std::to_string(target_samples_.size()) + " samples");
     return true;
 }
 
+std::vector<std::string> VCFProcessor::getContigNames() const {
+    std::vector<std::string> contigs;
+    if (!hdr_) {
+        return contigs;
+    }
+
+    int nseq = 0;
+    const char** seqnames = bcf_hdr_seqnames(hdr_, &nseq);
+    if (!seqnames || nseq <= 0) {
+        free(const_cast<char**>(seqnames));
+        return contigs;
+    }
+
+    contigs.reserve(nseq);
+    for (int i = 0; i < nseq; ++i) {
+        contigs.emplace_back(seqnames[i]);
+    }
+    free(const_cast<char**>(seqnames));
+    return contigs;
+}
+
 double VCFProcessor::extractAlleleFrequency(bcf1_t* rec) {
-    // Try to get AF from INFO field
     int n_values = 0;
     float* af_values = nullptr;
     if (bcf_get_info_float(hdr_, rec, "AF", &af_values, &n_values) > 0 && n_values > 0) {
         double af = static_cast<double>(af_values[0]);
         free(af_values);
-        // Ensure consistent precision (6 decimal places)
         return std::round(af * 1000000.0) / 1000000.0;
     }
 
-    // If AF not available, calculate from dosages
     std::vector<double> dosages;
     if (extractDosages(rec, dosages)) {
         double sum = 0.0;
@@ -149,7 +257,7 @@ double VCFProcessor::extractAlleleFrequency(bcf1_t* rec) {
         }
     }
 
-    return -1.0; // Unable to determine AF
+    return -1.0;
 }
 
 bool VCFProcessor::extractDosages(bcf1_t* rec, std::vector<double>& dosages) {
@@ -182,162 +290,192 @@ bool VCFProcessor::extractDosages(bcf1_t* rec, std::vector<double>& dosages) {
     return true;
 }
 
-// OLD METHOD: Load all variants (kept for backward compatibility with main.cpp)
-std::vector<std::unique_ptr<Variant>> VCFProcessor::processVariants() {
-    Timer timer("VCF processing");
-    std::vector<std::unique_ptr<Variant>> variants;
-    std::unordered_map<std::string, int> id_counts;
-
-    variants.reserve(100000);
-    logInfo("Starting variant processing...");
-
-    while (bcf_read(vcf_fp_, hdr_, rec_) == 0) {
-        total_variants_++;
-        bcf_unpack(rec_, BCF_UN_ALL);
-
-        std::string id = rec_->d.id ? rec_->d.id : ".";
-        std::string chrom = bcf_hdr_id2name(hdr_, rec_->rid);
-        int pos = rec_->pos + 1;
-        std::string ref = rec_->d.allele[0];
-        std::string alt = rec_->n_allele > 1 ? rec_->d.allele[1] : ".";
-
-        double af = extractAlleleFrequency(rec_);
-        if (af < 0) {
-            continue;
-        }
-
-        // Apply MAF filter
-        if (af < maf_filter_ || af > (1.0 - maf_filter_)) {
-            continue;
-        }
-
-        std::vector<double> dosages;
-        if (!extractDosages(rec_, dosages)) {
-            continue;
-        }
-
-        auto variant = std::make_unique<Variant>();
-        variant->id = std::move(id);
-        variant->chrom = std::move(chrom);
-        variant->pos = pos;
-        variant->ref = std::move(ref);
-        variant->alt = std::move(alt);
-        variant->af = af;
-        variant->dosages = std::move(dosages);
-
-        id_counts[variant->id]++;
-        variants.push_back(std::move(variant));
-
-        if (variants.size() % 10000 == 0) {
-            logInfo("Processed " + std::to_string(variants.size()) + " variants...");
-        }
-    }
-
-    // Remove duplicates
-    std::vector<std::unique_ptr<Variant>> final_variants;
-    final_variants.reserve(variants.size());
-    size_t original_size = variants.size();
-
-    for (auto& variant : variants) {
-        if (id_counts[variant->id] == 1) {
-            final_variants.push_back(std::move(variant));
-        }
-    }
-
-    duplicate_variants_ = original_size - final_variants.size();
-    filtered_variants_ = final_variants.size();
-
-    logInfo("Processed " + std::to_string(total_variants_) + " total variants");
-    logInfo("Filtered to " + std::to_string(filtered_variants_) + " variants after MAF filtering");
-    logInfo("Removed " + std::to_string(duplicate_variants_) + " duplicate variants");
-
-    return final_variants;
-}
-
-// NEW METHOD: Streaming with duplicate detection
+// stream variants with one-pass duplicate tracking.
 void VCFProcessor::streamVariants(VariantCallback callback) {
     Timer timer("VCF streaming");
-    std::unordered_map<std::string, int> id_counts;
+    std::unordered_map<std::string, IdState> id_states;
+    std::unordered_map<std::string, int> contig_rank;
 
     total_variants_ = 0;
     filtered_variants_ = 0;
     duplicate_variants_ = 0;
 
-    logInfo("Starting variant streaming (pass 1: counting duplicates)...");
+    {
+        int rank = 0;
+        for (const auto& contig : getContigNames()) {
+            contig_rank[contig] = rank++;
+        }
+    }
 
-    // First pass: count IDs for duplicate detection
+    auto tryExtractAfFromInfo = [&](bcf1_t* rec, double& af) -> bool {
+        int n_values = 0;
+        float* af_values = nullptr;
+        int ret = bcf_get_info_float(hdr_, rec, "AF", &af_values, &n_values);
+        if (ret > 0 && n_values > 0) {
+            af = std::round(static_cast<double>(af_values[0]) * 1000000.0) / 1000000.0;
+            free(af_values);
+            return true;
+        }
+        free(af_values);
+        return false;
+    };
+
+    auto computeAfFromDosages = [](const std::vector<double>& dosages) -> double {
+        double sum = 0.0;
+        int count = 0;
+        for (double d : dosages) {
+            if (d >= 0.0) {
+                sum += d;
+                count++;
+            }
+        }
+        if (count == 0) {
+            return -1.0;
+        }
+        return std::round((sum / (2.0 * count)) * 1000000.0) / 1000000.0;
+    };
+
+    char temp_path_template[] = "/tmp/safeld_dedup_XXXXXX";
+    int temp_fd = mkstemp(temp_path_template);
+    if (temp_fd < 0) {
+        throw std::runtime_error("Failed to create temporary deduplication spool file");
+    }
+    close(temp_fd);
+    TempFileGuard temp_guard{temp_path_template};
+
+    std::fstream spool(temp_guard.path, std::ios::in | std::ios::out | std::ios::binary | std::ios::trunc);
+    if (!spool) {
+        throw std::runtime_error("Failed to open temporary deduplication spool file");
+    }
+
+    logDebug("Starting single-pass variant scan with disk-backed duplicate handling...");
+
+    // make one pass over the VCF, spooling first occurrences and invalidating them if duplicates appear.
+    bool has_prev_coord = false;
+    std::string prev_chrom;
+    int prev_pos = 0;
+
     while (bcf_read(vcf_fp_, hdr_, rec_) == 0) {
         total_variants_++;
-        bcf_unpack(rec_, BCF_UN_STR);
-
-        std::string id = rec_->d.id ? rec_->d.id : ".";
-        double af = extractAlleleFrequency(rec_);
-
-        // Only count IDs that pass MAF filter
-        if (af >= 0 && af >= maf_filter_ && af <= (1.0 - maf_filter_)) {
-            id_counts[id]++;
-        }
-
-        if (total_variants_ % 50000 == 0) {
-            logInfo("Pass 1: Scanned " + std::to_string(total_variants_) + " variants...");
-        }
-    }
-
-    logInfo("Pass 1 complete: Found " + std::to_string(id_counts.size()) + " unique variant IDs");
-    logInfo("Starting pass 2: Re-opening VCF for streaming...");
-
-    // Close and re-open the VCF file to reset to beginning
-    closeVCF();
-    if (!openVCF()) {
-        throw std::runtime_error("Failed to re-open VCF file for second pass");
-    }
-
-    logInfo("Pass 2: Streaming variants...");
-
-    // Second pass: stream variants
-    int processed = 0;
-    while (bcf_read(vcf_fp_, hdr_, rec_) == 0) {
         bcf_unpack(rec_, BCF_UN_ALL);
+        if (total_variants_ % 50000 == 0) {
+            logDebug("Scanned " + std::to_string(total_variants_) + " variants...");
+        }
 
-        std::string id = rec_->d.id ? rec_->d.id : ".";
         std::string chrom = bcf_hdr_id2name(hdr_, rec_->rid);
         int pos = rec_->pos + 1;
-        std::string ref = rec_->d.allele[0];
-        std::string alt = rec_->n_allele > 1 ? rec_->d.allele[1] : ".";
+        if (has_prev_coord) {
+            int prev_rank = contig_rank.contains(prev_chrom) ? contig_rank[prev_chrom] : INT_MAX;
+            int curr_rank = contig_rank.contains(chrom) ? contig_rank[chrom] : INT_MAX;
 
-        double af = extractAlleleFrequency(rec_);
+            bool out_of_order = false;
+            if (prev_rank != INT_MAX && curr_rank != INT_MAX) {
+                out_of_order = (curr_rank < prev_rank) || (curr_rank == prev_rank && pos < prev_pos);
+            } else if (chrom != prev_chrom) {
+                out_of_order = chrom < prev_chrom;
+            } else {
+                out_of_order = pos < prev_pos;
+            }
+
+            if (out_of_order) {
+                throw std::runtime_error(
+                    "Input VCF is not coordinate-sorted. Offending record: " + chrom + ":" +
+                    std::to_string(pos) + " after " + prev_chrom + ":" + std::to_string(prev_pos));
+            }
+        }
+        prev_chrom = chrom;
+        prev_pos = pos;
+        has_prev_coord = true;
+
+        std::string id = rec_->d.id ? rec_->d.id : ".";
+        double af = -1.0;
+        std::vector<double> dosages;
+
+        if (!tryExtractAfFromInfo(rec_, af)) {
+            if (!extractDosages(rec_, dosages)) {
+                continue;
+            }
+            af = computeAfFromDosages(dosages);
+        }
+
         if (af < 0 || af < maf_filter_ || af > (1.0 - maf_filter_)) {
             continue;
         }
 
-        // Skip duplicates (detected in first pass)
-        if (id_counts[id] != 1) {
-            duplicate_variants_++;
+        auto& state = id_states[id];
+        state.count++;
+        if (state.count > 1) {
+            // invalidate the first kept record once, then skip later duplicates.
+            if (state.count == 2 && state.has_spooled_record) {
+                spool.seekp(state.keep_offset);
+                uint8_t keep = 0;
+                spool.write(reinterpret_cast<const char*>(&keep), sizeof(keep));
+                if (!spool) {
+                    throw std::runtime_error("Failed to invalidate duplicate spool record");
+                }
+                spool.seekp(0, std::ios::end);
+            }
             continue;
         }
 
-        std::vector<double> dosages;
-        if (!extractDosages(rec_, dosages)) {
+        if (dosages.empty()) {
+            if (!extractDosages(rec_, dosages)) {
+                // keep duplicate accounting state even when dosages cannot be extracted.
+                state.has_spooled_record = false;
+                continue;
+            }
+        }
+
+        Variant variant;
+        variant.id = std::move(id);
+        variant.chrom = std::move(chrom);
+        variant.pos = pos;
+        variant.ref = rec_->d.allele[0];
+        variant.alt = rec_->n_allele > 1 ? rec_->d.allele[1] : ".";
+        variant.af = af;
+        variant.dosages = std::move(dosages);
+
+        std::streamoff keep_offset = -1;
+        writeSpoolRecord(spool, variant, keep_offset);
+        state.keep_offset = keep_offset;
+        state.has_spooled_record = true;
+    }
+
+    duplicate_variants_ = 0;
+    for (const auto& [_, state] : id_states) {
+        if (state.count > 1) {
+            duplicate_variants_ += state.count;
+        }
+    }
+
+    // read the spool and emit only records still marked as kept.
+    spool.flush();
+    spool.clear();
+    spool.seekg(0, std::ios::beg);
+
+    int emitted = 0;
+    uint8_t keep = 0;
+    Variant spooled_variant;
+    while (readSpoolRecord(spool, keep, spooled_variant)) {
+        if (keep == 0) {
             continue;
         }
 
         auto variant = std::make_unique<Variant>();
-        variant->id = std::move(id);
-        variant->chrom = std::move(chrom);
-        variant->pos = pos;
-        variant->ref = std::move(ref);
-        variant->alt = std::move(alt);
-        variant->af = af;
-        variant->dosages = std::move(dosages);
-
-        // Stream to caller immediately
+        variant->id = std::move(spooled_variant.id);
+        variant->chrom = std::move(spooled_variant.chrom);
+        variant->pos = spooled_variant.pos;
+        variant->ref = std::move(spooled_variant.ref);
+        variant->alt = std::move(spooled_variant.alt);
+        variant->af = spooled_variant.af;
+        variant->dosages = std::move(spooled_variant.dosages);
         callback(std::move(variant));
 
         filtered_variants_++;
-        processed++;
+        emitted++;
 
-        if (processed % 10000 == 0) {
-            logInfo("Pass 2: Streamed " + std::to_string(processed) + " variants...");
+        if (emitted % 10000 == 0) {
+            logDebug("Emitted " + std::to_string(emitted) + " deduplicated variants...");
         }
     }
 
