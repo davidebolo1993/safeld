@@ -40,6 +40,7 @@ private:
 
     double extractAlleleFrequency(bcf1_t* rec);
     bool extractDosages(bcf1_t* rec, std::vector<double>& dosages);
+    bool extractDosagesFromGT(bcf1_t* rec, std::vector<double>& dosages);
 
 public:
     VCFProcessor(const std::string& vcf_file, double maf_filter);

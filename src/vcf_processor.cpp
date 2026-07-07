@@ -11,6 +11,26 @@
 #include <unistd.h>
 
 namespace {
+// Sentinel marking a not-yet-imputed missing genotype. Real dosages are always
+// >= 0, so any negative value is unambiguously "missing" until imputeMissingWithMean runs.
+constexpr double MISSING_DOSAGE = -1.0;
+
+// Replace missing entries (negative sentinels) with the mean of the observed
+// dosages. Mean-imputation keeps the variant's mean unchanged and avoids the
+// downward bias that filling missing calls with 0.0 introduced.
+void imputeMissingWithMean(std::vector<double>& dosages, double observed_sum, int observed_count) {
+    if (observed_count == 0) {
+        std::fill(dosages.begin(), dosages.end(), 0.0);
+        return;
+    }
+    const double mean = observed_sum / observed_count;
+    for (double& d : dosages) {
+        if (d < 0.0) {
+            d = mean;
+        }
+    }
+}
+
 struct SpoolRecordHeader {
     uint8_t keep;
     int32_t pos;
@@ -266,27 +286,94 @@ bool VCFProcessor::extractDosages(bcf1_t* rec, std::vector<double>& dosages) {
     int ret = bcf_get_format_float(hdr_, rec, "DS", &ds_values, &n_values);
 
     if (ret <= 0) {
-        return false;
+        // No DS field: fall back to deriving dosages from GT hard calls.
+        free(ds_values);
+        return extractDosagesFromGT(rec, dosages);
     }
 
     int n_samples = bcf_hdr_nsamples(hdr_);
     dosages.clear();
     dosages.reserve(target_samples_.size());
 
+    double observed_sum = 0.0;
+    int observed_count = 0;
     for (int idx : sample_indices_) {
         if (idx < n_samples && idx < n_values) {
             float ds_val = ds_values[idx];
             if (bcf_float_is_missing(ds_val)) {
-                dosages.push_back(0.0);
+                dosages.push_back(MISSING_DOSAGE);
             } else {
-                dosages.push_back(static_cast<double>(ds_val));
+                double d = static_cast<double>(ds_val);
+                dosages.push_back(d);
+                observed_sum += d;
+                observed_count++;
             }
         } else {
-            dosages.push_back(0.0);
+            dosages.push_back(MISSING_DOSAGE);
         }
     }
 
     free(ds_values);
+    imputeMissingWithMean(dosages, observed_sum, observed_count);
+    return true;
+}
+
+// Derive an ALT-allele dosage (0..ploidy) from GT hard calls when DS is absent.
+bool VCFProcessor::extractDosagesFromGT(bcf1_t* rec, std::vector<double>& dosages) {
+    int n_gt = 0;
+    int32_t* gt_arr = nullptr;
+    int ret = bcf_get_genotypes(hdr_, rec, &gt_arr, &n_gt);
+    if (ret <= 0) {
+        free(gt_arr);
+        return false;
+    }
+
+    int n_samples = bcf_hdr_nsamples(hdr_);
+    int max_ploidy = n_gt / n_samples;
+    if (max_ploidy <= 0) {
+        free(gt_arr);
+        return false;
+    }
+
+    dosages.clear();
+    dosages.reserve(target_samples_.size());
+
+    double observed_sum = 0.0;
+    int observed_count = 0;
+    for (int idx : sample_indices_) {
+        if (idx >= n_samples) {
+            dosages.push_back(MISSING_DOSAGE);
+            continue;
+        }
+
+        const int32_t* ptr = gt_arr + static_cast<size_t>(idx) * max_ploidy;
+        double dosage = 0.0;
+        bool any_called = false;
+        for (int p = 0; p < max_ploidy; ++p) {
+            if (ptr[p] == bcf_int32_vector_end) {
+                break;  // sample has lower ploidy than the record max
+            }
+            if (bcf_gt_is_missing(ptr[p])) {
+                continue;
+            }
+            // Count any non-reference allele (ALT dosage for biallelic sites).
+            if (bcf_gt_allele(ptr[p]) > 0) {
+                dosage += 1.0;
+            }
+            any_called = true;
+        }
+
+        if (any_called) {
+            dosages.push_back(dosage);
+            observed_sum += dosage;
+            observed_count++;
+        } else {
+            dosages.push_back(MISSING_DOSAGE);
+        }
+    }
+
+    free(gt_arr);
+    imputeMissingWithMean(dosages, observed_sum, observed_count);
     return true;
 }
 
