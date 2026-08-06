@@ -44,6 +44,44 @@ find_package(PkgConfig REQUIRED)
 # Find htslib
 pkg_check_modules(HTSLIB REQUIRED htslib)
 
+# ---------------------------------------------------------------------------
+# Optional native .pgen support via plink-ng's pgenlib.
+#
+# pgenlib is LGPL-3.0 while safeld is MIT. Building it as a SHARED library keeps
+# the LGPL relinking requirement satisfied without affecting safeld's own
+# licence: a user can substitute their own pgenlib build. Do not switch this to
+# a static library without reading the LGPL terms first.
+#
+#   git clone --depth 1 https://github.com/chrchang/plink-ng
+#   cmake -DSAFELD_PGEN=ON -DPLINK_NG_DIR=/path/to/plink-ng ..
+# ---------------------------------------------------------------------------
+option(SAFELD_PGEN "Build native .pgen support (requires plink-ng, LGPL-3.0)" OFF)
+set(PLINK_NG_DIR "" CACHE PATH "Path to a plink-ng checkout")
+
+if(SAFELD_PGEN)
+    if(NOT PLINK_NG_DIR)
+        message(FATAL_ERROR "SAFELD_PGEN=ON requires -DPLINK_NG_DIR=/path/to/plink-ng")
+    endif()
+    set(PGENLIB_INCLUDE "${PLINK_NG_DIR}/2.0/include")
+    if(NOT EXISTS "${PGENLIB_INCLUDE}/pgenlib_read.h")
+        message(FATAL_ERROR "pgenlib_read.h not found under ${PGENLIB_INCLUDE}")
+    endif()
+    if(NOT EXISTS "${PLINK_NG_DIR}/2.0/simde")
+        message(FATAL_ERROR "plink-ng's vendored simde/ is missing; clone without --sparse")
+    endif()
+
+    add_library(pgenlib SHARED
+        ${PGENLIB_INCLUDE}/plink2_base.cc
+        ${PGENLIB_INCLUDE}/plink2_bits.cc
+        ${PGENLIB_INCLUDE}/plink2_simd.cc
+        ${PGENLIB_INCLUDE}/pgenlib_misc.cc
+        ${PGENLIB_INCLUDE}/pgenlib_read.cc
+    )
+    target_include_directories(pgenlib PUBLIC ${PGENLIB_INCLUDE})
+    set_target_properties(pgenlib PROPERTIES CXX_STANDARD 11 POSITION_INDEPENDENT_CODE ON)
+    message(STATUS "Native .pgen support: ON (pgenlib from ${PLINK_NG_DIR}, LGPL-3.0)")
+endif()
+
 # Shared/common source files
 set(SHARED_SOURCES
     src/vcf_processor.cpp
@@ -59,7 +97,16 @@ set(SAFELD_SOURCES
     ${SHARED_SOURCES}
 )
 
+if(SAFELD_PGEN)
+    list(APPEND SAFELD_SOURCES src/pgen_reader.cpp)
+endif()
+
 add_executable(safeld ${SAFELD_SOURCES})
+
+if(SAFELD_PGEN)
+    target_link_libraries(safeld pgenlib)
+    target_compile_definitions(safeld PRIVATE SAFELD_HAVE_PGEN=1)
+endif()
 
 target_link_libraries(safeld 
     ${BLAS_LIBRARIES}
@@ -85,4 +132,6 @@ message(STATUS "HTSlib found: ${HTSLIB_FOUND}")
 message(STATUS "HTSlib version: ${HTSLIB_VERSION}")
 message(STATUS "Building executable:")
 message(STATUS "  - safeld (three-stage chunked workflow)")
+message(STATUS "Native .pgen support: ${SAFELD_PGEN}")
+message(STATUS "Tune for building CPU (SAFELD_NATIVE): ${SAFELD_NATIVE}")
 message(STATUS "============================")
