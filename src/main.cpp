@@ -13,13 +13,16 @@ void printUsage(const char* program_name) {
     std::cout << "    -out DIR             Output directory for preprocessed data\n";
     std::cout << "    -samples LIST        Comma-separated sample IDs\n";
     std::cout << "    -maf FLOAT           MAF filter (default: 0.01)\n";
+    std::cout << "    -max-missing FLOAT   Max fraction of missing calls per variant (default: 0.1)\n";
+    std::cout << "    -dosage-field FIELD  auto|DS|GT: which FORMAT field to read (default: auto)\n";
     std::cout << "    -ntraits INT         Number of traits (default: 10)\n";
     std::cout << "    -chunk-size INT      Variants per chunk (default: 10000)\n";
     std::cout << "    -traits-per-tile INT Traits per tile (default: auto, ~1GB tiles)\n";
     std::cout << "    -h, --help           Show this help message\n\n";
     std::cout << "Global options:\n";
     std::cout << "    -verbose             Enable detailed debug logging\n\n";
-    std::cout << "  Note: input VCF must be coordinate-sorted.\n\n";
+    std::cout << "  Note: input VCF must be coordinate-sorted and biallelic\n";
+    std::cout << "        (split with: bcftools norm -m -any).\n\n";
 
     std::cout << "Stage 2 - Simulation:\n";
     std::cout << "  " << program_name << " simulate [OPTIONS]\n";
@@ -80,11 +83,15 @@ int main(int argc, char* argv[]) {
                     std::cout << "  -out DIR             Output directory for preprocessed data (required)\n";
                     std::cout << "  -samples LIST        Comma-separated sample IDs\n";
                     std::cout << "  -maf FLOAT           MAF filter (default: 0.01)\n";
+                    std::cout << "  -max-missing FLOAT   Max fraction of missing calls per variant (default: 0.1)\n";
+                    std::cout << "  -dosage-field FIELD  auto|DS|GT: which FORMAT field to read (default: auto)\n";
+                    std::cout << "                       auto prefers DS but falls back to GT where DS is sparse\n";
                     std::cout << "  -ntraits INT         Number of traits (default: 10)\n";
                     std::cout << "  -chunk-size INT      Variants per chunk (default: 10000)\n";
                     std::cout << "  -traits-per-tile INT Traits per tile (default: auto, ~1GB tiles)\n";
                     std::cout << "  -h, --help           Show this help message\n\n";
-                    std::cout << "Note: input VCF must be coordinate-sorted.\n\n";
+                    std::cout << "Note: input VCF must be coordinate-sorted and biallelic\n";
+                    std::cout << "      (split with: bcftools norm -m -any).\n\n";
                     return 0;
                 }
 
@@ -96,6 +103,14 @@ int main(int argc, char* argv[]) {
                     config.sample_list = argv[++i];
                 } else if (arg == "-maf" && i + 1 < argc) {
                     config.maf_filter = std::stod(argv[++i]);
+                } else if (arg == "-max-missing" && i + 1 < argc) {
+                    config.max_missing_rate = std::stod(argv[++i]);
+                } else if (arg == "-dosage-field" && i + 1 < argc) {
+                    std::string field = argv[++i];
+                    if (field == "auto") config.dosage_field = DosageField::Auto;
+                    else if (field == "DS" || field == "ds") config.dosage_field = DosageField::DS;
+                    else if (field == "GT" || field == "gt") config.dosage_field = DosageField::GT;
+                    else { logError("-dosage-field must be auto, DS or GT"); return 1; }
                 } else if (arg == "-ntraits" && i + 1 < argc) {
                     config.n_traits = std::stoi(argv[++i]);
                 } else if (arg == "-chunk-size" && i + 1 < argc) {
@@ -108,6 +123,22 @@ int main(int argc, char* argv[]) {
             if (config.vcf_file.empty() || config.output_dir.empty()) {
                 logError("VCF file and output directory are required");
                 std::cout << "\nUse: " << argv[0] << " preprocess --help for usage information\n";
+                return 1;
+            }
+            if (config.maf_filter < 0.0 || config.maf_filter >= 0.5) {
+                logError("-maf must be in [0, 0.5)");
+                return 1;
+            }
+            if (config.max_missing_rate < 0.0 || config.max_missing_rate > 1.0) {
+                logError("-max-missing must be in [0, 1]");
+                return 1;
+            }
+            if (config.n_traits < 1) {
+                logError("-ntraits must be >= 1");
+                return 1;
+            }
+            if (config.chunk_size < 1) {
+                logError("-chunk-size must be >= 1");
                 return 1;
             }
 
@@ -158,6 +189,18 @@ int main(int argc, char* argv[]) {
             }
             if (config.variant_batch_size <= 0) {
                 logError("variant-batch-size must be > 0");
+                return 1;
+            }
+            if (config.n_workers < 0) {
+                logError("-workers must be >= 0 (0 = auto-detect)");
+                return 1;
+            }
+            if ((config.start_chunk >= 0) != (config.end_chunk >= 0)) {
+                logError("-start-chunk and -end-chunk must be given together");
+                return 1;
+            }
+            if (config.start_chunk >= 0 && config.end_chunk < config.start_chunk) {
+                logError("-end-chunk must be >= -start-chunk");
                 return 1;
             }
 

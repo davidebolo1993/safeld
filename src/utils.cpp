@@ -61,32 +61,36 @@ double parseDouble(const std::string& str, double defaultValue) {
     }
 }
 
-std::vector<double> standardize(const std::vector<double>& data) {
+bool standardize(const std::vector<double>& data, std::vector<double>& out) {
     if (data.empty()) {
-        return {};
+        return false;
     }
-    
+
     double sum = std::accumulate(data.begin(), data.end(), 0.0);
     double mean = sum / data.size();
-    
+
+    // Mean-imputed entries sit exactly at the mean and so contribute nothing to
+    // the sum of squares while still counting towards the denominator. This is
+    // the usual convention (plink does the same) and shrinks sigma by
+    // sqrt(n_observed / n) at variants with missing calls.
     double sq_sum = 0.0;
     for (double value : data) {
         sq_sum += (value - mean) * (value - mean);
     }
     double std_dev = std::sqrt(sq_sum / data.size());
-    
-    if (std_dev == 0.0) {
-        return std::vector<double>(data.size(), 0.0);
+
+    if (!(std_dev > 0.0)) {
+        return false;
     }
-    
-    std::vector<double> standardized;
-    standardized.reserve(data.size());
-    
+
+    out.clear();
+    out.reserve(data.size());
+
     for (double value : data) {
-        standardized.push_back((value - mean) / std_dev);
+        out.push_back((value - mean) / std_dev);
     }
-    
-    return standardized;
+
+    return true;
 }
 
 std::vector<double> scaleToDosageRange(const std::vector<double>& data) {

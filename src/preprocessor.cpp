@@ -172,19 +172,16 @@ void Preprocessor::saveTraitsMetadata(const TraitsMetadata& meta) {
     logDebug("Saved traits metadata");
 }
 
-void Preprocessor::processAndChunkVCF() {
+void Preprocessor::processAndChunkVCF(VCFProcessor& processor) {
     Timer timer("VCF processing and chunking");
 
-    VCFProcessor processor(config_.vcf_file, config_.maf_filter);
-    if (!processor.initialize(config_.sample_list)) {
-        throw std::runtime_error("Failed to initialize VCF processor");
-    }
-
-    logInfo("Starting streaming VCF processing with chunk size: " + 
+    logInfo("Starting streaming VCF processing with chunk size: " +
            std::to_string(config_.chunk_size));
     logDebug("Memory-efficient mode: processing variants one at a time");
 
     int chunk_id = 0;
+    int chunks_written = 0;
+    int monomorphic_variants = 0;
     std::vector<std::vector<double>> current_chunk_genotypes;
     ChunkMetadata current_meta;
 
@@ -196,7 +193,16 @@ void Preprocessor::processAndChunkVCF() {
     current_meta.alts.reserve(config_.chunk_size);
 
     processor.streamVariants([&](std::unique_ptr<Variant> variant) {
-        current_chunk_genotypes.push_back(standardize(variant->dosages));
+        std::vector<double> standardized;
+        if (!standardize(variant->dosages, standardized)) {
+            // Zero variance across the selected samples: the variant carries no
+            // LD information, and a constant row would be emitted downstream as a
+            // synthetic dosage of 1.0 for every trait.
+            monomorphic_variants++;
+            return;
+        }
+
+        current_chunk_genotypes.push_back(std::move(standardized));
         current_meta.variant_ids.push_back(std::move(variant->id));
         current_meta.chroms.push_back(std::move(variant->chrom));
         current_meta.positions.push_back(variant->pos);
@@ -209,7 +215,8 @@ void Preprocessor::processAndChunkVCF() {
             current_meta.n_samples = n_samples_;
 
             saveChunk(chunk_id, current_chunk_genotypes, current_meta);
-            logDebug("Saved chunk " + std::to_string(chunk_id) + " (" + 
+            chunks_written++;
+            logDebug("Saved chunk " + std::to_string(chunk_id) + " (" +
                      std::to_string(current_chunk_genotypes.size()) + " variants)");
 
             chunk_id++;
@@ -228,11 +235,21 @@ void Preprocessor::processAndChunkVCF() {
         current_meta.n_samples = n_samples_;
 
         saveChunk(chunk_id, current_chunk_genotypes, current_meta);
-        logDebug("Saved final chunk " + std::to_string(chunk_id) + " (" + 
+        chunks_written++;
+        logDebug("Saved final chunk " + std::to_string(chunk_id) + " (" +
                  std::to_string(current_chunk_genotypes.size()) + " variants)");
     }
 
-    logInfo("VCF streaming completed: " + std::to_string(chunk_id + 1) + " chunks created");
+    if (monomorphic_variants > 0) {
+        logInfo("Variants skipped (no variance across the selected samples): " +
+                std::to_string(monomorphic_variants));
+    }
+
+    logInfo("VCF streaming completed: " + std::to_string(chunks_written) + " chunks created");
+    if (chunks_written == 0) {
+        logWarning("No chunks were created; check the MAF, missingness and "
+                   "deduplication counts above");
+    }
 }
 
 void Preprocessor::saveChunk(int chunk_id, const std::vector<std::vector<double>>& genotypes,
@@ -244,8 +261,17 @@ void Preprocessor::saveChunk(int chunk_id, const std::vector<std::vector<double>
     }
 
     for (const auto& row : genotypes) {
-        out.write(reinterpret_cast<const char*>(row.data()), 
+        if (row.size() != static_cast<size_t>(n_samples_)) {
+            throw std::runtime_error("Genotype row length " + std::to_string(row.size()) +
+                                     " does not match sample count " + std::to_string(n_samples_));
+        }
+        out.write(reinterpret_cast<const char*>(row.data()),
                  n_samples_ * sizeof(double));
+    }
+
+    out.flush();
+    if (!out) {
+        throw std::runtime_error("Failed while writing chunk file: " + bin_file);
     }
 
     saveChunkMetadata(meta);
@@ -277,16 +303,21 @@ void Preprocessor::run() {
 
     createOutputDirectories();
 
-    VCFProcessor temp_processor(config_.vcf_file, config_.maf_filter);
-    if (!temp_processor.initialize(config_.sample_list)) {
+    // A single processor serves the whole stage: the deduplication spool holds a
+    // full copy of the genotype matrix, so it is kept next to the output rather
+    // than on whatever /tmp happens to be.
+    VCFProcessor processor(config_.vcf_file, config_.maf_filter,
+                           config_.max_missing_rate, config_.output_dir,
+                           config_.dosage_field);
+    if (!processor.initialize(config_.sample_list)) {
         throw std::runtime_error("Failed to initialize VCF processor");
     }
-    n_samples_ = temp_processor.getTargetSamples().size();
-    saveHeaderMetadata(temp_processor.getContigNames());
+    n_samples_ = processor.getTargetSamples().size();
+    saveHeaderMetadata(processor.getContigNames());
 
     generateAndSaveTraits();
 
-    processAndChunkVCF();
+    processAndChunkVCF(processor);
 
     logInfo("Preprocessing completed successfully!");
     logInfo("Output directory: " + config_.output_dir);

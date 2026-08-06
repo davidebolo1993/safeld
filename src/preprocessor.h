@@ -4,10 +4,17 @@
 #include <vector>
 #include <memory>
 
+#include "vcf_processor.h"
+
+
 struct PreprocessConfig {
     std::string vcf_file;
     std::string output_dir;
     double maf_filter = 0.01;
+    // Drop variants whose fraction of missing calls exceeds this (plink --geno).
+    double max_missing_rate = 0.1;
+    // Which FORMAT field supplies dosages.
+    DosageField dosage_field = DosageField::Auto;
     int n_traits = 10;
     int chunk_size = 10000;  // variants per chunk
     int traits_per_tile = 0;  // 0 = auto (aim for ~1GB per tile)
@@ -43,7 +50,7 @@ private:
     
     void createOutputDirectories();
     void generateAndSaveTraits();
-    void processAndChunkVCF();
+    void processAndChunkVCF(VCFProcessor& processor);
     void saveHeaderMetadata(const std::vector<std::string>& contig_names);
     
     void saveTraitsTiled();

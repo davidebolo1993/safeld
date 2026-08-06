@@ -7,7 +7,10 @@
 #include <sstream>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
+#include <cerrno>
 #include <climits>
+#include <unordered_set>
 #include <unistd.h>
 
 namespace {
@@ -18,17 +21,39 @@ constexpr double MISSING_DOSAGE = -1.0;
 // Replace missing entries (negative sentinels) with the mean of the observed
 // dosages. Mean-imputation keeps the variant's mean unchanged and avoids the
 // downward bias that filling missing calls with 0.0 introduced.
-void imputeMissingWithMean(std::vector<double>& dosages, double observed_sum, int observed_count) {
-    if (observed_count == 0) {
+//
+// The all-missing case is only reachable when the caller has chosen to keep such
+// a variant (max_missing_rate >= 1.0); the resulting constant row is dropped
+// later by standardize(), which refuses zero-variance input.
+void imputeMissingWithMean(std::vector<double>& dosages, const DosageStats& stats) {
+    if (stats.observed_count == 0) {
         std::fill(dosages.begin(), dosages.end(), 0.0);
         return;
     }
-    const double mean = observed_sum / observed_count;
+    const double mean = stats.observed_sum / stats.observed_count;
     for (double& d : dosages) {
         if (d < 0.0) {
             d = mean;
         }
     }
+}
+
+// Fraction of samples with no usable call, computed before imputation.
+double missingRate(const DosageStats& stats, size_t n_samples) {
+    if (n_samples == 0) {
+        return 1.0;
+    }
+    return 1.0 - static_cast<double>(stats.observed_count) / static_cast<double>(n_samples);
+}
+
+// ALT allele frequency over the observed calls only. Dosages are on the diploid
+// 0..2 scale, so the denominator is 2 alleles per observed sample.
+double alleleFrequencyFromObserved(const DosageStats& stats) {
+    if (stats.observed_count == 0) {
+        return -1.0;
+    }
+    const double af = stats.observed_sum / (2.0 * stats.observed_count);
+    return std::round(af * 1000000.0) / 1000000.0;
 }
 
 struct SpoolRecordHeader {
@@ -42,7 +67,7 @@ struct SpoolRecordHeader {
     uint32_t dosages_count;
 };
 
-struct IdState {
+struct DupState {
     std::streamoff keep_offset = -1;
     int count = 0;
     bool has_spooled_record = false;
@@ -116,12 +141,27 @@ bool readSpoolRecord(std::fstream& file, uint8_t& keep, Variant& variant) {
 
     return true;
 }
+
+// Flip a spooled record's keep flag to 0 so the emit pass skips it.
+void invalidateSpoolRecord(std::fstream& file, std::streamoff offset) {
+    file.seekp(offset);
+    const uint8_t keep = 0;
+    file.write(reinterpret_cast<const char*>(&keep), sizeof(keep));
+    if (!file) {
+        throw std::runtime_error("Failed to invalidate duplicate spool record");
+    }
+    file.seekp(0, std::ios::end);
+}
 }  // namespace
 
-VCFProcessor::VCFProcessor(const std::string& vcf_file, double maf_filter)
-    : vcf_file_(vcf_file), maf_filter_(maf_filter), vcf_fp_(nullptr),
-      hdr_(nullptr), rec_(nullptr), total_variants_(0),
-      filtered_variants_(0), duplicate_variants_(0) {
+VCFProcessor::VCFProcessor(const std::string& vcf_file, double maf_filter,
+                           double max_missing_rate, const std::string& temp_dir,
+                           DosageField dosage_field)
+    : vcf_file_(vcf_file), maf_filter_(maf_filter), max_missing_rate_(max_missing_rate),
+      dosage_field_(dosage_field), temp_dir_(temp_dir), vcf_fp_(nullptr),
+      hdr_(nullptr), rec_(nullptr), use_info_af_(true), total_variants_(0),
+      filtered_variants_(0), duplicate_variants_(0), multiallelic_variants_(0),
+      missing_filtered_variants_(0), gt_fallback_variants_(0), gt_filled_calls_(0) {
 }
 
 VCFProcessor::~VCFProcessor() {
@@ -208,6 +248,17 @@ void VCFProcessor::setupTargetSamples(const std::string& sample_list_str) {
         logDebug("Found " + std::to_string(target_samples_.size()) + " of " +
                  std::to_string(requested_samples.size()) + " requested samples");
     }
+
+    // INFO/AF is computed over every sample in the file. Trusting it while the
+    // genotype matrix is built from a subset would filter variants on a frequency
+    // the matrix does not have, so fall back to recomputing AF from the selected
+    // samples whenever the cohort is not used in full.
+    use_info_af_ = (sample_indices_.size() == static_cast<size_t>(n_samples));
+    if (!use_info_af_) {
+        logInfo("Sample subset in use (" + std::to_string(sample_indices_.size()) + "/" +
+                std::to_string(n_samples) + "): INFO/AF ignored, allele frequencies "
+                "recomputed from the selected samples");
+    }
 }
 
 bool VCFProcessor::initialize(const std::string& sample_list_str) {
@@ -252,74 +303,110 @@ std::vector<std::string> VCFProcessor::getContigNames() const {
     return contigs;
 }
 
-double VCFProcessor::extractAlleleFrequency(bcf1_t* rec) {
-    int n_values = 0;
-    float* af_values = nullptr;
-    if (bcf_get_info_float(hdr_, rec, "AF", &af_values, &n_values) > 0 && n_values > 0) {
-        double af = static_cast<double>(af_values[0]);
-        free(af_values);
-        return std::round(af * 1000000.0) / 1000000.0;
+// Fill `dosages` with one entry per target sample, using MISSING_DOSAGE for
+// samples with no usable call, and report the observed totals in `stats`.
+// Imputation is deliberately left to the caller so that allele frequency and
+// missingness can be measured against real calls first.
+bool VCFProcessor::extractDosages(bcf1_t* rec, std::vector<double>& dosages, DosageStats& stats) {
+    if (dosage_field_ == DosageField::GT) {
+        return extractDosagesFromGT(rec, dosages, stats);
     }
 
-    std::vector<double> dosages;
-    if (extractDosages(rec, dosages)) {
-        double sum = 0.0;
-        int count = 0;
-        for (double d : dosages) {
-            if (d >= 0.0) {
-                sum += d;
-                count++;
-            }
-        }
-        if (count > 0) {
-            double af = sum / (2.0 * count);
-            return std::round(af * 1000000.0) / 1000000.0;
-        }
-    }
-
-    return -1.0;
-}
-
-bool VCFProcessor::extractDosages(bcf1_t* rec, std::vector<double>& dosages) {
     int n_values = 0;
     float* ds_values = nullptr;
     int ret = bcf_get_format_float(hdr_, rec, "DS", &ds_values, &n_values);
 
     if (ret <= 0) {
-        // No DS field: fall back to deriving dosages from GT hard calls.
+        // No DS field on this record.
         free(ds_values);
-        return extractDosagesFromGT(rec, dosages);
+        if (dosage_field_ == DosageField::DS) {
+            return false;
+        }
+        return extractDosagesFromGT(rec, dosages, stats);
     }
 
     int n_samples = bcf_hdr_nsamples(hdr_);
+    // DS is one value per ALT allele; records are biallelic here, so anything
+    // other than one value per sample is a shape we cannot index by sample.
+    if (n_samples <= 0 || n_values / n_samples != 1) {
+        free(ds_values);
+        if (dosage_field_ == DosageField::DS) {
+            return false;
+        }
+        return extractDosagesFromGT(rec, dosages, stats);
+    }
+
     dosages.clear();
     dosages.reserve(target_samples_.size());
+    stats = DosageStats{};
 
-    double observed_sum = 0.0;
-    int observed_count = 0;
     for (int idx : sample_indices_) {
-        if (idx < n_samples && idx < n_values) {
-            float ds_val = ds_values[idx];
-            if (bcf_float_is_missing(ds_val)) {
-                dosages.push_back(MISSING_DOSAGE);
-            } else {
-                double d = static_cast<double>(ds_val);
-                dosages.push_back(d);
-                observed_sum += d;
-                observed_count++;
-            }
-        } else {
+        if (idx >= n_samples) {
             dosages.push_back(MISSING_DOSAGE);
+            continue;
         }
+
+        float ds_val = ds_values[idx];
+        // The htslib sentinels are NaN bit patterns, and the MISSING_DOSAGE
+        // scheme relies on stored dosages being non-negative, so reject
+        // anything that is not a real value in [0, inf).
+        if (bcf_float_is_missing(ds_val) || bcf_float_is_vector_end(ds_val) ||
+            !(ds_val >= 0.0f)) {
+            dosages.push_back(MISSING_DOSAGE);
+            continue;
+        }
+
+        double d = static_cast<double>(ds_val);
+        dosages.push_back(d);
+        stats.observed_sum += d;
+        stats.observed_count++;
     }
 
     free(ds_values);
-    imputeMissingWithMean(dosages, observed_sum, observed_count);
+
+    // A VCF may carry GT for every sample while omitting the DS subfield for
+    // many of them: plink2 exports look exactly like "0|1:0.97" sitting next to
+    // a bare "0|0". Such a sample is NOT missing - its genotype is known from
+    // GT - so mean-imputing it would invent data and attenuate every pairwise r2
+    // in proportion to the DS presence rate. Fill each gap from that sample's own
+    // hard call instead, keeping the real dosage wherever one was written.
+    if (dosage_field_ == DosageField::Auto && stats.observed_count < static_cast<int>(dosages.size())) {
+        std::vector<double> gt_dosages;
+        DosageStats gt_stats;
+        if (extractDosagesFromGT(rec, gt_dosages, gt_stats) &&
+            gt_dosages.size() == dosages.size()) {
+            int filled = 0;
+            for (size_t i = 0; i < dosages.size(); ++i) {
+                if (dosages[i] < 0.0 && gt_dosages[i] >= 0.0) {
+                    dosages[i] = gt_dosages[i];
+                    filled++;
+                }
+            }
+            if (filled > 0) {
+                // Recompute the observed totals over the merged vector.
+                stats = DosageStats{};
+                for (double d : dosages) {
+                    if (d >= 0.0) {
+                        stats.observed_sum += d;
+                        stats.observed_count++;
+                    }
+                }
+                gt_fallback_variants_++;
+                gt_filled_calls_ += filled;
+            }
+        }
+    }
+
     return true;
 }
 
-// Derive an ALT-allele dosage (0..ploidy) from GT hard calls when DS is absent.
-bool VCFProcessor::extractDosagesFromGT(bcf1_t* rec, std::vector<double>& dosages) {
+// Derive an ALT-allele dosage on the diploid 0..2 scale from GT hard calls when
+// DS is absent. Each sample is normalised by its own ploidy, so a hemizygous ALT
+// call (chrX/chrY in a male, mitochondria) scores 2.0 and cannot be mistaken for
+// a heterozygote. A genotype with any missing allele (./1) is treated as missing
+// outright rather than being silently counted as a reference call.
+bool VCFProcessor::extractDosagesFromGT(bcf1_t* rec, std::vector<double>& dosages,
+                                        DosageStats& stats) {
     int n_gt = 0;
     int32_t* gt_arr = nullptr;
     int ret = bcf_get_genotypes(hdr_, rec, &gt_arr, &n_gt);
@@ -329,7 +416,7 @@ bool VCFProcessor::extractDosagesFromGT(bcf1_t* rec, std::vector<double>& dosage
     }
 
     int n_samples = bcf_hdr_nsamples(hdr_);
-    int max_ploidy = n_gt / n_samples;
+    int max_ploidy = n_samples > 0 ? n_gt / n_samples : 0;
     if (max_ploidy <= 0) {
         free(gt_arr);
         return false;
@@ -337,9 +424,8 @@ bool VCFProcessor::extractDosagesFromGT(bcf1_t* rec, std::vector<double>& dosage
 
     dosages.clear();
     dosages.reserve(target_samples_.size());
+    stats = DosageStats{};
 
-    double observed_sum = 0.0;
-    int observed_count = 0;
     for (int idx : sample_indices_) {
         if (idx >= n_samples) {
             dosages.push_back(MISSING_DOSAGE);
@@ -347,45 +433,68 @@ bool VCFProcessor::extractDosagesFromGT(bcf1_t* rec, std::vector<double>& dosage
         }
 
         const int32_t* ptr = gt_arr + static_cast<size_t>(idx) * max_ploidy;
-        double dosage = 0.0;
-        bool any_called = false;
+        int alt_count = 0;
+        int ploidy = 0;
+        bool any_missing = false;
         for (int p = 0; p < max_ploidy; ++p) {
             if (ptr[p] == bcf_int32_vector_end) {
                 break;  // sample has lower ploidy than the record max
             }
             if (bcf_gt_is_missing(ptr[p])) {
-                continue;
+                any_missing = true;
+                break;
             }
-            // Count any non-reference allele (ALT dosage for biallelic sites).
+            ploidy++;
+            // Records are biallelic here, so any non-reference allele is ALT.
             if (bcf_gt_allele(ptr[p]) > 0) {
-                dosage += 1.0;
+                alt_count++;
             }
-            any_called = true;
         }
 
-        if (any_called) {
-            dosages.push_back(dosage);
-            observed_sum += dosage;
-            observed_count++;
-        } else {
+        if (any_missing || ploidy == 0) {
             dosages.push_back(MISSING_DOSAGE);
+            continue;
         }
+
+        double dosage = 2.0 * alt_count / ploidy;
+        dosages.push_back(dosage);
+        stats.observed_sum += dosage;
+        stats.observed_count++;
     }
 
     free(gt_arr);
-    imputeMissingWithMean(dosages, observed_sum, observed_count);
     return true;
+}
+
+// Location of the deduplication spool. It holds the full dosage vector of every
+// kept variant, so it must land on a filesystem with room for a second copy of
+// the genotype matrix, not on a small /tmp.
+std::string VCFProcessor::makeSpoolPath() const {
+    std::string dir = temp_dir_;
+    if (dir.empty()) {
+        const char* env_tmp = std::getenv("TMPDIR");
+        dir = (env_tmp && *env_tmp) ? env_tmp : "/tmp";
+    }
+    while (dir.size() > 1 && dir.back() == '/') {
+        dir.pop_back();
+    }
+    return dir + "/safeld_dedup_XXXXXX";
 }
 
 // stream variants with one-pass duplicate tracking.
 void VCFProcessor::streamVariants(VariantCallback callback) {
     Timer timer("VCF streaming");
-    std::unordered_map<std::string, IdState> id_states;
+    std::unordered_map<std::string, DupState> dup_states;
+    std::unordered_set<std::streamoff> retracted_offsets;
     std::unordered_map<std::string, int> contig_rank;
 
     total_variants_ = 0;
     filtered_variants_ = 0;
     duplicate_variants_ = 0;
+    multiallelic_variants_ = 0;
+    missing_filtered_variants_ = 0;
+    gt_fallback_variants_ = 0;
+    gt_filled_calls_ = 0;
 
     {
         int rank = 0;
@@ -407,28 +516,21 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
         return false;
     };
 
-    auto computeAfFromDosages = [](const std::vector<double>& dosages) -> double {
-        double sum = 0.0;
-        int count = 0;
-        for (double d : dosages) {
-            if (d >= 0.0) {
-                sum += d;
-                count++;
-            }
-        }
-        if (count == 0) {
-            return -1.0;
-        }
-        return std::round((sum / (2.0 * count)) * 1000000.0) / 1000000.0;
+    auto failsMafFilter = [this](double af) {
+        return af < 0.0 || af < maf_filter_ || af > (1.0 - maf_filter_);
     };
 
-    char temp_path_template[] = "/tmp/safeld_dedup_XXXXXX";
-    int temp_fd = mkstemp(temp_path_template);
+    std::string spool_template = makeSpoolPath();
+    std::vector<char> spool_path_buf(spool_template.begin(), spool_template.end());
+    spool_path_buf.push_back('\0');
+    int temp_fd = mkstemp(spool_path_buf.data());
     if (temp_fd < 0) {
-        throw std::runtime_error("Failed to create temporary deduplication spool file");
+        throw std::runtime_error("Failed to create temporary deduplication spool file at " +
+                                 spool_template + ": " + std::string(strerror(errno)));
     }
     close(temp_fd);
-    TempFileGuard temp_guard{temp_path_template};
+    TempFileGuard temp_guard{std::string(spool_path_buf.data())};
+    logDebug("Deduplication spool: " + temp_guard.path);
 
     std::fstream spool(temp_guard.path, std::ios::in | std::ios::out | std::ios::binary | std::ios::trunc);
     if (!spool) {
@@ -474,64 +576,102 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
         prev_pos = pos;
         has_prev_coord = true;
 
+        // Only biallelic records are meaningful downstream: a single ALT column,
+        // a single INFO/AF value and one dosage per sample. A multiallelic record
+        // would collapse several ALT alleles into one column, so require it to be
+        // split upstream (bcftools norm -m -any).
+        if (rec_->n_allele != 2) {
+            multiallelic_variants_++;
+            continue;
+        }
+
         std::string id = rec_->d.id ? rec_->d.id : ".";
+        std::string ref = rec_->d.allele[0];
+        std::string alt = rec_->d.allele[1];
+
         double af = -1.0;
         std::vector<double> dosages;
+        DosageStats stats;
+        bool have_dosages = false;
 
-        if (!tryExtractAfFromInfo(rec_, af)) {
-            if (!extractDosages(rec_, dosages)) {
+        // INFO/AF is the cheap path: it lets whole-cohort runs reject a variant
+        // before touching per-sample data.
+        if (use_info_af_ && tryExtractAfFromInfo(rec_, af)) {
+            if (failsMafFilter(af)) {
                 continue;
             }
-            af = computeAfFromDosages(dosages);
+        } else {
+            if (!extractDosages(rec_, dosages, stats)) {
+                continue;
+            }
+            have_dosages = true;
+            af = alleleFrequencyFromObserved(stats);
+            if (failsMafFilter(af)) {
+                continue;
+            }
         }
 
-        if (af < 0 || af < maf_filter_ || af > (1.0 - maf_filter_)) {
+        if (!have_dosages && !extractDosages(rec_, dosages, stats)) {
             continue;
         }
 
-        auto& state = id_states[id];
-        state.count++;
-        if (state.count > 1) {
-            // invalidate the first kept record once, then skip later duplicates.
-            if (state.count == 2 && state.has_spooled_record) {
-                spool.seekp(state.keep_offset);
-                uint8_t keep = 0;
-                spool.write(reinterpret_cast<const char*>(&keep), sizeof(keep));
-                if (!spool) {
-                    throw std::runtime_error("Failed to invalidate duplicate spool record");
+        // Drop variants that are mostly uncalled. Without this a variant whose
+        // calls are all missing passes the INFO/AF filter, is imputed to a
+        // constant vector, and surfaces as a synthetic dosage of exactly 1.0 for
+        // every trait with no warning anywhere.
+        if (missingRate(stats, dosages.size()) > max_missing_rate_) {
+            missing_filtered_variants_++;
+            continue;
+        }
+        imputeMissingWithMean(dosages, stats);
+
+        // Deduplicate on the locus, plus on the ID when the record actually has
+        // one. Keying on the ID alone silently discarded every ID-less record,
+        // because they all share the "." placeholder and so looked like copies of
+        // each other.
+        std::string locus_key = "L:" + chrom + ":" + std::to_string(pos) + ":" + ref + ":" + alt;
+        std::vector<std::string> dup_keys{locus_key};
+        if (id != ".") {
+            dup_keys.push_back("I:" + id);
+        }
+
+        bool is_duplicate = false;
+        for (const auto& key : dup_keys) {
+            auto& state = dup_states[key];
+            state.count++;
+            if (state.count == 1) {
+                continue;
+            }
+            is_duplicate = true;
+            // Retract the first copy once, then skip every later one.
+            if (state.has_spooled_record) {
+                if (retracted_offsets.insert(state.keep_offset).second) {
+                    invalidateSpoolRecord(spool, state.keep_offset);
+                    duplicate_variants_++;
                 }
-                spool.seekp(0, std::ios::end);
-            }
-            continue;
-        }
-
-        if (dosages.empty()) {
-            if (!extractDosages(rec_, dosages)) {
-                // keep duplicate accounting state even when dosages cannot be extracted.
                 state.has_spooled_record = false;
-                continue;
             }
+        }
+        if (is_duplicate) {
+            duplicate_variants_++;
+            continue;
         }
 
         Variant variant;
         variant.id = std::move(id);
         variant.chrom = std::move(chrom);
         variant.pos = pos;
-        variant.ref = rec_->d.allele[0];
-        variant.alt = rec_->n_allele > 1 ? rec_->d.allele[1] : ".";
+        variant.ref = std::move(ref);
+        variant.alt = std::move(alt);
         variant.af = af;
         variant.dosages = std::move(dosages);
 
         std::streamoff keep_offset = -1;
         writeSpoolRecord(spool, variant, keep_offset);
-        state.keep_offset = keep_offset;
-        state.has_spooled_record = true;
-    }
-
-    duplicate_variants_ = 0;
-    for (const auto& [_, state] : id_states) {
-        if (state.count > 1) {
-            duplicate_variants_ += state.count;
+        for (const auto& key : dup_keys) {
+            auto& state = dup_states[key];
+            state.keep_offset = keep_offset;
+            state.has_spooled_record = true;
         }
     }
 
@@ -568,6 +708,20 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
 
     logInfo("Streaming complete!");
     logInfo("Total variants scanned: " + std::to_string(total_variants_));
-    logInfo("Variants after MAF filter: " + std::to_string(filtered_variants_));
+    logInfo("Variants emitted: " + std::to_string(filtered_variants_));
+    logInfo("Non-biallelic variants skipped: " + std::to_string(multiallelic_variants_));
+    logInfo("Variants skipped (missing rate > " + std::to_string(max_missing_rate_) + "): " +
+            std::to_string(missing_filtered_variants_));
     logInfo("Duplicate variants skipped: " + std::to_string(duplicate_variants_));
+    if (gt_fallback_variants_ > 0) {
+        logWarning("DS was absent for " + std::to_string(gt_filled_calls_) +
+                   " call(s) across " + std::to_string(gt_fallback_variants_) +
+                   " variant(s); filled from each sample's own GT hard call "
+                   "rather than imputing. Use -dosage-field GT for a matrix built "
+                   "from one field throughout.");
+    }
+
+    if (filtered_variants_ == 0) {
+        logWarning("No variants passed filtering; downstream stages will have nothing to process");
+    }
 }

@@ -13,8 +13,8 @@ SAFELD processes VCF files to generate synthetic traits while preserving the lin
 ## Features
 
 - **High Performance**: Optimized C++ implementation with OpenBLAS integration and BLAS GEMM operations
-- **Memory Efficient**: Custom memory pools and optimized data structures
-- **Parallel Processing**: Multi-threaded variant processing with OpenMP
+- **Memory Efficient**: Streaming, chunked data structures that keep the working set bounded
+- **Parallel Processing**: Multi-threaded BLAS, with the thread count exposed via `-workers`
 - **Flexible Input**: Supports compressed and uncompressed VCF files
 - **HTSlib Integration**: Robust VCF parsing using industry-standard library
 - **Docker Support**: Containerized deployment for reproducibility
@@ -81,7 +81,8 @@ Global option:
 #### Stage 1: Preprocessing
 
 Generates trait matrix and partitions variants into chunks.
-Input VCF must be coordinate-sorted.
+Input VCF must be coordinate-sorted and biallelic (split multiallelic records
+first with `bcftools norm -m -any`; non-biallelic records are skipped and counted).
 
 ```bash
 ./safeld preprocess \
@@ -101,11 +102,17 @@ Options:
   -out DIR             Output directory for preprocessed data
   -samples LIST        Comma-separated sample IDs
   -maf FLOAT           MAF filter (default: 0.01)
+  -max-missing FLOAT   Max fraction of missing calls per variant (default: 0.1)
+  -dosage-field FIELD  auto|DS|GT: which FORMAT field to read (default: auto)
   -ntraits INT         Number of traits (default: 10)
   -chunk-size INT      Variants per chunk (default: 10000)
   -traits-per-tile INT Traits per tile (default: auto, ~1GB tiles)
   -h, --help           Show this help message
 ```
+
+> **Disk space:** preprocessing writes a temporary deduplication spool into the
+> output directory holding one copy of the genotype matrix
+> (`n_variants x n_samples x 8` bytes). It is removed when the stage finishes.
 
 **Output structure:**
 ```
@@ -193,10 +200,45 @@ Options:
 SAFELD separates preprocessing from simulation for scalability:
 
 **Preprocessing Stage:**
-1. Parse VCF once and apply MAF filtering
-2. Generate trait matrix W (T × S) with standard normal random values
-3. Standardize genotype dosages and partition into chunks (B variants each)
-4. Serialize traits (tiled if large) and genotype chunks to disk
+1. Parse VCF once, skip non-biallelic records, and apply MAF and missingness filtering
+2. Deduplicate on locus (`CHROM:POS:REF:ALT`) and, where present, on variant ID
+3. Generate trait matrix W (T × S) with standard normal random values
+4. Standardize genotype dosages and partition into chunks (B variants each)
+5. Serialize traits (tiled if large) and genotype chunks to disk
+
+**Missing genotypes:**
+
+Missingness is resolved during preprocessing, before standardization:
+
+- A `DS` value that is absent, negative or `NaN` counts as missing. Without `DS`,
+  dosages are derived from `GT` on the diploid 0–2 scale, normalized by each
+  sample's own ploidy so a hemizygous ALT call (chrX/chrY in a male,
+  mitochondria) scores 2.0 rather than being confused with a heterozygote.
+- **`-dosage-field` matters for VCFs that carry both `GT` and `DS`.** Some
+  exports (plink2 in particular) write the `DS` subfield for only a fraction of
+  samples while `GT` stays complete — `0|1:0.97` sitting next to a bare `0|0`.
+  Such a sample is *not* missing: its genotype is known from `GT`. The default
+  `auto` therefore fills each absent dosage from that sample's own hard call
+  rather than imputing it, and reports how many calls it filled. Treating those
+  gaps as missing and mean-imputing them attenuates every pairwise r² in
+  proportion to the `DS` presence rate — on a file with 30% `DS` coverage a true
+  r² of 0.80 reads as 0.09 — which appears as distinct lower bands against the
+  original LD. `-dosage-field GT` builds the matrix from hard calls throughout;
+  `-dosage-field DS` never falls back. Run `scripts/safeld_check.sh` on an input
+  to see its `DS` presence distribution and what each mode would keep.
+- A genotype with **any** missing allele (`./1`) counts as missing outright; it
+  is not silently scored as a reference call.
+- Variants whose missing fraction exceeds `-max-missing` are dropped and counted.
+- Surviving missing entries are replaced with the mean of that variant's observed
+  dosages, which leaves the variant mean unchanged. Because imputed entries sit
+  exactly at the mean, σ is shrunk by `sqrt(n_observed / n)`; this is the usual
+  convention (plink does the same).
+- Allele frequency and missingness are measured on observed calls only. `INFO/AF`
+  is used as a fast pre-filter only when the whole cohort is in use — under
+  `-samples` it describes samples that are not in the matrix, so AF is recomputed
+  from the selected samples instead.
+- Variants with no variance across the selected samples are dropped, since
+  per-variant scaling would otherwise emit them as a constant dosage for every trait.
 
 **Simulation Stage:**
 1. Load trait metadata once
@@ -226,9 +268,12 @@ SAFELD separates preprocessing from simulation for scalability:
 ### Input VCF Requirements
 
 - Must contain `DS` (dosage) format field or `GT` (genotype) field
-- Should include `AF` (allele frequency) in INFO field (calculated if missing)
+- Should include `AF` (allele frequency) in INFO field (calculated if missing, and
+  always recomputed from the selected samples when `-samples` is used)
 - Supports both compressed (.vcf.gz) and uncompressed (.vcf) files
 - Must be coordinate-sorted (enforced during preprocessing)
+- Must be biallelic; multiallelic records are skipped and reported. Split them
+  with `bcftools norm -m -any` to keep them
 
 ### Output VCF Structure
 
