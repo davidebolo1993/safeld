@@ -34,7 +34,7 @@ ChunkedSimulator::ChunkedSimulator(const SimulationConfig& config)
 // of being linked against.
 void ChunkedSimulator::configureThreads() {
     if (config_.n_workers <= 0) {
-        logInfo("Thread count: auto-detected by BLAS/OpenMP");
+        logDebug("Thread count: auto-detected by BLAS/OpenMP");
         return;
     }
 
@@ -107,9 +107,9 @@ void ChunkedSimulator::loadTraitsMetadata() {
         throw std::runtime_error("Trait metadata mismatch: sum(tile_trait_counts) != n_traits");
     }
 
-    logInfo("Traits metadata: " + std::to_string(traits_meta_.n_traits) + " traits, " +
-            std::to_string(traits_meta_.n_samples) + " samples, " +
-            std::to_string(traits_meta_.n_tiles) + " tiles");
+    logInfo("Traits: " + formatCount(traits_meta_.n_traits) + " x " +
+            formatCount(traits_meta_.n_samples) + " samples in " +
+            std::to_string(traits_meta_.n_tiles) + " tile(s)");
 }
 
 void ChunkedSimulator::loadHeaderMetadata() {
@@ -128,7 +128,7 @@ void ChunkedSimulator::loadHeaderMetadata() {
         }
     }
 
-    logInfo("Loaded " + std::to_string(contig_header_lines_.size()) + " contig header records");
+    logDebug("Loaded " + std::to_string(contig_header_lines_.size()) + " contig header records");
 }
 
 std::vector<double> ChunkedSimulator::loadTraitsTileData(int tile_id, int n_traits) {
@@ -244,8 +244,6 @@ std::vector<std::vector<double>> ChunkedSimulator::loadChunkGenotypes(int chunk_
 }
 
 void ChunkedSimulator::simulateChunk(int chunk_id) {
-    logInfo("Starting simulation for chunk " + std::to_string(chunk_id));
-    
     auto meta = loadChunkMetadata(chunk_id);
     if (meta.n_variants == 0) {
         logWarning("Chunk " + std::to_string(chunk_id) + " contains no variants; skipping");
@@ -254,21 +252,16 @@ void ChunkedSimulator::simulateChunk(int chunk_id) {
 
     auto genotypes = loadChunkGenotypes(chunk_id, meta.n_variants);
 
-    logInfo("Processing chunk " + std::to_string(chunk_id) + ": " +
-            std::to_string(meta.n_variants) + " variants");
-
     const int variant_batch_size = std::max(1, config_.variant_batch_size);
     std::vector<std::vector<double>> all_synthetic_dosages;
     all_synthetic_dosages.reserve(meta.n_variants);
     
     int num_variant_batches = (meta.n_variants + variant_batch_size - 1) / variant_batch_size;
     
+    ProgressBar chunk_bar("Chunk " + std::to_string(chunk_id), meta.n_variants);
     for (int vbatch = 0; vbatch < num_variant_batches; ++vbatch) {
         int vbatch_start = vbatch * variant_batch_size;
         int vbatch_size = std::min(variant_batch_size, meta.n_variants - vbatch_start);
-        
-        logInfo("Processing variant batch " + std::to_string(vbatch + 1) + "/" +
-                std::to_string(num_variant_batches) + " (" + std::to_string(vbatch_size) + " variants)");
         
         logDebug("  Flattening genotypes...");
         std::vector<double> G_flat(vbatch_size * traits_meta_.n_samples);
@@ -336,13 +329,11 @@ void ChunkedSimulator::simulateChunk(int chunk_id) {
             auto scaled = scaleToDosageRange(row);
             all_synthetic_dosages.push_back(std::move(scaled));
         }
+        chunk_bar.update(vbatch_start + vbatch_size);
     }
+    chunk_bar.finish();
     
-    logInfo("All variants processed and scaled");
-
-    logInfo("Starting to write output for chunk " + std::to_string(chunk_id));
     writeChunkVCF(chunk_id, meta, all_synthetic_dosages);
-    logInfo("Chunk " + std::to_string(chunk_id) + " completed successfully");
 }
 
 void ChunkedSimulator::writeChunkVCF(int chunk_id, const ChunkMetadata& meta,
@@ -394,10 +385,6 @@ void ChunkedSimulator::writeChunkVCF(int chunk_id, const ChunkMetadata& meta,
 
             bgzf_write(fp, line.c_str(), line.length());
 
-            if ((v + 1) % 1000 == 0 || v == meta.n_variants - 1) {
-                logDebug("  Written " + std::to_string(v + 1) + "/" +
-                         std::to_string(meta.n_variants) + " variants");
-            }
         }
         bgzf_close(fp);
     } else {
@@ -428,21 +415,18 @@ void ChunkedSimulator::writeChunkVCF(int chunk_id, const ChunkMetadata& meta,
                 out << "\t" << std::fixed << std::setprecision(4) << dosage;
             }
             out << "\n";
-            if ((v + 1) % 1000 == 0 || v == meta.n_variants - 1) {
-                logDebug("  Written " + std::to_string(v + 1) + "/" +
-                         std::to_string(meta.n_variants) + " variants");
-            }
         }
     }
-    logInfo("Written chunk " + std::to_string(chunk_id) + " to: " + output_file);
+    logDebug("Wrote " + output_file);
 }
 
 void ChunkedSimulator::run() {
-    logInfo("Starting chunked simulation...");
+    LogModule module("simulate");
+    Timer timer("simulate stage");
     if (config_.variant_batch_size <= 0) {
         throw std::runtime_error("variant_batch_size must be > 0");
     }
-    logInfo("Variant batch size: " + std::to_string(config_.variant_batch_size));
+    logDebug("Variant batch size: " + formatCount(config_.variant_batch_size));
 
     configureThreads();
     loadTraitsMetadata();
@@ -454,7 +438,6 @@ void ChunkedSimulator::run() {
         logWarning("Only " + std::to_string(traits_meta_.n_traits) + " trait(s): per-variant "
                    "scaling has no spread to work with and every output dosage will be identical");
     }
-    logInfo("Trait tiles will be streamed on demand during simulation");
 
     if (mkdir(config_.output_dir.c_str(), 0755) != 0 && errno != EEXIST) {
         throw std::runtime_error("Failed to create output directory");
@@ -476,11 +459,11 @@ void ChunkedSimulator::run() {
             chunk_ids.push_back(chunk_id++);
         }
     }
-    logInfo("Processing " + std::to_string(chunk_ids.size()) + " chunks");
+    logInfo("Processing " + std::to_string(chunk_ids.size()) + " chunk(s)");
 
     for (int chunk_id : chunk_ids) {
         simulateChunk(chunk_id);
     }
 
-    logInfo("Chunked simulation completed!");
+    logInfo("Done in " + formatDuration(timer.elapsed()) + " -> " + config_.output_dir);
 }

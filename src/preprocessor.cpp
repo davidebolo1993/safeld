@@ -56,20 +56,18 @@ void Preprocessor::createOutputDirectories() {
                                std::string(strerror(errno)));
     }
 
-    logInfo("Created output directories in: " + config_.output_dir);
+    logDebug("Created output directories in " + config_.output_dir);
 }
 
 void Preprocessor::generateAndSaveTraits() {
     Timer timer("Traits matrix generation and serialization");
-    logInfo("Generating " + std::to_string(config_.n_traits) + " traits for " +
-           std::to_string(n_samples_) + " samples");
     saveTraitsTiled();
 }
 
 int Preprocessor::calculateTraitsPerTile() const {
     if (config_.traits_per_tile > 0) {
-        logDebug("Using user-specified traits per tile: " + 
-                std::to_string(config_.traits_per_tile));
+        logDebug("Using user-specified traits per tile: " +
+                 std::to_string(config_.traits_per_tile));
         return config_.traits_per_tile;
     }
 
@@ -79,8 +77,8 @@ int Preprocessor::calculateTraitsPerTile() const {
 
     traits_per_tile = std::min(traits_per_tile, config_.n_traits);
 
-    logInfo("Traits per tile: " + std::to_string(traits_per_tile) + 
-            " (auto, target ~1GB tiles)");
+    logDebug("Traits per tile: " + std::to_string(traits_per_tile) +
+             " (auto, target ~1GB tiles)");
 
     return traits_per_tile;
 }
@@ -94,9 +92,10 @@ void Preprocessor::saveTraitsTiled() {
     size_t bytes_per_trait = n_samples_ * sizeof(double);
     size_t tile_size_mb = (traits_per_tile * bytes_per_trait) / (1024 * 1024);
 
-    logInfo("Saving traits matrix in " + std::to_string(n_tiles) + " tiles (" +
-           std::to_string(traits_per_tile) + " traits per tile, ~" +
-           std::to_string(tile_size_mb) + " MB per tile)");
+    logInfo("Trait matrix: " + formatCount(config_.n_traits) + " x " +
+            formatCount(n_samples_) + " in " + std::to_string(n_tiles) + " tile(s) of " +
+            formatBytes(static_cast<unsigned long long>(traits_per_tile) * bytes_per_trait));
+    (void)tile_size_mb;
 
     TraitsMetadata meta;
     meta.n_traits = config_.n_traits;
@@ -108,6 +107,7 @@ void Preprocessor::saveTraitsTiled() {
     std::normal_distribution<double> dist(0.0, 1.0);
     std::vector<double> trait_row(n_samples_);
     int generated_traits = 0;
+    ProgressBar traits_bar("Generating traits", config_.n_traits);
 
     for (int tile_id = 0; tile_id < n_tiles; ++tile_id) {
         int start_trait = tile_id * traits_per_tile;
@@ -128,10 +128,7 @@ void Preprocessor::saveTraitsTiled() {
                       static_cast<std::streamsize>(n_samples_ * sizeof(double)));
 
             generated_traits++;
-            if (generated_traits % 1000 == 0 || generated_traits == config_.n_traits) {
-                logDebug("Generated " + std::to_string(generated_traits) + "/" +
-                         std::to_string(config_.n_traits) + " traits");
-            }
+            traits_bar.update(generated_traits);
         }
 
         if (!out) {
@@ -140,15 +137,11 @@ void Preprocessor::saveTraitsTiled() {
 
         meta.tile_trait_counts.push_back(traits_in_tile);
 
-        if (n_tiles > 50 && (tile_id + 1) % 10 == 0) {
-            logDebug("Saved " + std::to_string(tile_id + 1) + "/" + 
-                     std::to_string(n_tiles) + " tiles");
-        } else if (n_tiles <= 50) {
-            logDebug("Saved tile " + std::to_string(tile_id) + " (" + 
-                     std::to_string(traits_in_tile) + " traits)");
-        }
+        logDebug("Wrote tile " + std::to_string(tile_id) + " (" +
+                 std::to_string(traits_in_tile) + " traits)");
     }
 
+    traits_bar.finish();
     saveTraitsMetadata(meta);
 }
 
@@ -175,9 +168,7 @@ void Preprocessor::saveTraitsMetadata(const TraitsMetadata& meta) {
 void Preprocessor::processAndChunkVCF(VCFProcessor& processor) {
     Timer timer("VCF processing and chunking");
 
-    logInfo("Starting streaming VCF processing with chunk size: " +
-           std::to_string(config_.chunk_size));
-    logDebug("Memory-efficient mode: processing variants one at a time");
+    logDebug("Chunk size: " + formatCount(config_.chunk_size) + " variants");
 
     int chunk_id = 0;
     int chunks_written = 0;
@@ -216,8 +207,8 @@ void Preprocessor::processAndChunkVCF(VCFProcessor& processor) {
 
             saveChunk(chunk_id, current_chunk_genotypes, current_meta);
             chunks_written++;
-            logDebug("Saved chunk " + std::to_string(chunk_id) + " (" +
-                     std::to_string(current_chunk_genotypes.size()) + " variants)");
+            logDebug("Wrote chunk " + std::to_string(chunk_id) + " (" +
+                     formatCount(current_chunk_genotypes.size()) + " variants)");
 
             chunk_id++;
             current_chunk_genotypes.clear();
@@ -236,16 +227,16 @@ void Preprocessor::processAndChunkVCF(VCFProcessor& processor) {
 
         saveChunk(chunk_id, current_chunk_genotypes, current_meta);
         chunks_written++;
-        logDebug("Saved final chunk " + std::to_string(chunk_id) + " (" +
-                 std::to_string(current_chunk_genotypes.size()) + " variants)");
+        logDebug("Wrote final chunk " + std::to_string(chunk_id) + " (" +
+                 formatCount(current_chunk_genotypes.size()) + " variants)");
     }
 
     if (monomorphic_variants > 0) {
-        logInfo("Variants skipped (no variance across the selected samples): " +
-                std::to_string(monomorphic_variants));
+        logInfo("  excluded " + formatCount(monomorphic_variants) +
+                " with no variance across the selected samples");
     }
 
-    logInfo("VCF streaming completed: " + std::to_string(chunks_written) + " chunks created");
+    logInfo("Wrote " + std::to_string(chunks_written) + " chunk(s)");
     if (chunks_written == 0) {
         logWarning("No chunks were created; check the MAF, missingness and "
                    "deduplication counts above");
@@ -299,7 +290,8 @@ void Preprocessor::saveChunkMetadata(const ChunkMetadata& meta) {
 }
 
 void Preprocessor::run() {
-    logInfo("Starting preprocessing...");
+    LogModule module("preprocess");
+    Timer timer("preprocess stage");
 
     createOutputDirectories();
 
@@ -319,6 +311,5 @@ void Preprocessor::run() {
 
     processAndChunkVCF(processor);
 
-    logInfo("Preprocessing completed successfully!");
-    logInfo("Output directory: " + config_.output_dir);
+    logInfo("Done in " + formatDuration(timer.elapsed()) + " -> " + config_.output_dir);
 }

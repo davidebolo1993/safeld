@@ -1,23 +1,50 @@
 name: Docker CI
 on:
   push:
-    branches: main
+    branches: ['**']
+  pull_request:
+
 jobs:
-  main:
+  # Build on every branch and PR without publishing, so a broken Dockerfile is
+  # caught before it reaches main and gets pushed to :latest.
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v1
+      - uses: actions/checkout@v4
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
+        uses: docker/setup-buildx-action@v3
+      - name: Build image (no push)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: safeld:ci
+      - name: Smoke test
+        run: |
+          docker run --rm safeld:ci --help
+          docker run --rm --entrypoint bcftools safeld:ci --version
+          docker run --rm --entrypoint sh safeld:ci -c \
+            'ls /usr/local/share/safeld/scripts/'
+
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Login to DockerHub
-        uses: docker/login-action@v1
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
       - name: Build and push
-        id: docker_build
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@v5
         with:
+          context: .
           push: true
           tags: davidebolo1993/safeld:latest

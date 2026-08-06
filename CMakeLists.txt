@@ -9,9 +9,19 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Compiler optimizations  
+# Optimising for the building CPU is off by default. On a cluster the login node
+# that compiles is often not the node that runs, and a binary built with
+# -march=native dies with SIGILL on any host lacking those instructions. The same
+# applies to a container image built on one machine and run on another. Turn it
+# on with -DSAFELD_NATIVE=ON when the build and run hosts are the same.
+option(SAFELD_NATIVE "Optimise for the building CPU (faster, not portable)" OFF)
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -mtune=native -DNDEBUG")
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+    if(SAFELD_NATIVE)
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native -mtune=native")
+        message(STATUS "SAFELD_NATIVE=ON: binary will only run on this CPU family")
+    endif()
     set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -Wall -Wextra -Wpedantic")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
 endif()

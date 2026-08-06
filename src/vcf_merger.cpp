@@ -157,11 +157,11 @@ bool VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
     std::unordered_map<std::string, int> contig_rank;
     int next_contig_rank = 0;
     kstring_t line = KS_INITIALIZE;
+    ProgressBar merge_bar("Merging chunks", static_cast<long long>(chunk_files.size()));
     
     for (size_t chunk_idx = 0; chunk_idx < chunk_files.size(); ++chunk_idx) {
         const auto& chunk_file = chunk_files[chunk_idx];
-        logInfo("Processing chunk " + std::to_string(chunk_idx + 1) + "/" + 
-               std::to_string(chunk_files.size()) + ": " + chunk_file);
+        logDebug("Merging " + chunk_file);
         
         BGZF* in_fp = nullptr;
         std::ifstream in_file;
@@ -174,9 +174,7 @@ bool VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
                 continue;
             }
             
-            int line_count = 0;
             while (bgzf_getline(in_fp, '\n', &line) >= 0) {
-                line_count++;
                 
                 if (line.l == 0) continue;
                 
@@ -238,9 +236,6 @@ bool VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
                     out_file << "\n";
                 }
                 
-                if (line_count % 50000 == 0) {
-                    logDebug("  Processed " + std::to_string(line_count) + " lines...");
-                }
             }
             
             bgzf_close(in_fp);
@@ -254,10 +249,7 @@ bool VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
             
             std::string str_line;
             str_line.reserve(10000);
-            int line_count = 0;
-            
             while (std::getline(in_file, str_line)) {
-                line_count++;
                 
                 if (str_line.empty()) continue;
                 
@@ -317,20 +309,19 @@ bool VCFMerger::mergeChunks(const std::vector<std::string>& chunk_files) {
                     out_file << str_line << "\n";
                 }
                 
-                if (line_count % 50000 == 0) {
-                    logDebug("  Processed " + std::to_string(line_count) + " lines...");
-                }
             }
         }
+        merge_bar.update(static_cast<long long>(chunk_idx) + 1);
     }
-    
+
+    merge_bar.finish();
     ks_free(&line);
     
     if (out_fp) {
         bgzf_close(out_fp);
     }
     
-    logInfo("Merged VCF written to: " + config_.output_file);
+    logDebug("Merged VCF written to " + config_.output_file);
     return is_sorted;
 }
 
@@ -385,15 +376,16 @@ void VCFMerger::finalizeOutput(bool already_sorted) {
 }
 
 void VCFMerger::run() {
-    logInfo("Starting VCF merge...");
-    
+    LogModule module("merge");
+    Timer timer("merge stage");
+
     auto chunk_files = findChunkFiles();
     
     if (chunk_files.empty()) {
         throw std::runtime_error("No chunk files found in: " + config_.input_dir);
     }
     
-    logInfo("Found " + std::to_string(chunk_files.size()) + " chunk files");
+    logDebug("Found " + std::to_string(chunk_files.size()) + " chunk files");
     
     bool is_sorted = mergeChunks(chunk_files);
     if (config_.enforce_sort && !is_sorted) {
@@ -401,5 +393,5 @@ void VCFMerger::run() {
     }
     finalizeOutput(is_sorted);
     
-    logInfo("VCF merge completed!");
+    logInfo("Done in " + formatDuration(timer.elapsed()) + " -> " + config_.output_file);
 }

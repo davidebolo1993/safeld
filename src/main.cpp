@@ -68,8 +68,6 @@ int main(int argc, char* argv[]) {
         }
         setVerboseLogging(verbose_logs);
 
-        logInfo("SAFELD initialized");
-
         if (mode == "preprocess") {
             PreprocessConfig config;
 

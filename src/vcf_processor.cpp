@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <fstream>
 #include <sstream>
+#include <iomanip>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
@@ -544,12 +545,11 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
     std::string prev_chrom;
     int prev_pos = 0;
 
+    ProgressCounter scan("Scanning", "variants");
     while (bcf_read(vcf_fp_, hdr_, rec_) == 0) {
         total_variants_++;
+        scan.increment();
         bcf_unpack(rec_, BCF_UN_ALL);
-        if (total_variants_ % 50000 == 0) {
-            logDebug("Scanned " + std::to_string(total_variants_) + " variants...");
-        }
 
         std::string chrom = bcf_hdr_id2name(hdr_, rec_->rid);
         int pos = rec_->pos + 1;
@@ -675,12 +675,15 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
         }
     }
 
+    scan.finish();
+
     // read the spool and emit only records still marked as kept.
     spool.flush();
     spool.clear();
     spool.seekg(0, std::ios::beg);
 
-    int emitted = 0;
+    ProgressBar emit_bar("Emitting variants", total_variants_ - duplicate_variants_ -
+                         multiallelic_variants_ - missing_filtered_variants_);
     uint8_t keep = 0;
     Variant spooled_variant;
     while (readSpoolRecord(spool, keep, spooled_variant)) {
@@ -699,20 +702,27 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
         callback(std::move(variant));
 
         filtered_variants_++;
-        emitted++;
-
-        if (emitted % 10000 == 0) {
-            logDebug("Emitted " + std::to_string(emitted) + " deduplicated variants...");
-        }
+        emit_bar.increment();
     }
+    emit_bar.finish();
 
-    logInfo("Streaming complete!");
-    logInfo("Total variants scanned: " + std::to_string(total_variants_));
-    logInfo("Variants emitted: " + std::to_string(filtered_variants_));
-    logInfo("Non-biallelic variants skipped: " + std::to_string(multiallelic_variants_));
-    logInfo("Variants skipped (missing rate > " + std::to_string(max_missing_rate_) + "): " +
-            std::to_string(missing_filtered_variants_));
-    logInfo("Duplicate variants skipped: " + std::to_string(duplicate_variants_));
+    // Report the totals, then only the exclusions that actually happened: a wall
+    // of zeroes buries the one line that matters.
+    logInfo("Scanned " + formatCount(total_variants_) + " variants, kept " +
+            formatCount(filtered_variants_));
+    if (multiallelic_variants_ > 0) {
+        logInfo("  excluded " + formatCount(multiallelic_variants_) + " non-biallelic");
+    }
+    if (missing_filtered_variants_ > 0) {
+        std::ostringstream mm;
+        mm << std::fixed << std::setprecision(3) << max_missing_rate_;
+        logInfo("  excluded " + formatCount(missing_filtered_variants_) +
+                " over the missingness limit (" + mm.str() + ")");
+    }
+    if (duplicate_variants_ > 0) {
+        logInfo("  excluded " + formatCount(duplicate_variants_) +
+                " duplicated by locus or ID (every copy)");
+    }
     if (gt_fallback_variants_ > 0) {
         logWarning("DS was absent for " + std::to_string(gt_filled_calls_) +
                    " call(s) across " + std::to_string(gt_fallback_variants_) +

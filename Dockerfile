@@ -17,10 +17,12 @@ SHELL ["mamba", "run", "-n", "safeld_conda_environment", "/bin/bash", "-c"]
 # Copy the rest of the source code
 COPY CMakeLists.txt .
 COPY src/ ./src/
+COPY scripts/ ./scripts/
 
 # Build the application using your original CMakeLists.txt
+# SAFELD_NATIVE stays off: an image built on one CPU must run on another.
 RUN mkdir build && cd build && \
-    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    cmake -DCMAKE_BUILD_TYPE=Release -DSAFELD_NATIVE=OFF .. && \
     make -j$(nproc)
 
 # =============================================================================
@@ -32,8 +34,19 @@ LABEL maintainer="davide.bolognini@fht.org"
 LABEL version="0.0.1"
 LABEL description="A portable container for the safeld application."
 
+# merge shells out to bcftools when the concatenated chunks turn out unsorted,
+# and the diagnostic scripts need it too. Installed from apt rather than copied
+# out of the conda env, which would leave its own dependencies (libcurl,
+# libcrypto) behind.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends bcftools ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
 # Copy the compiled executable from the build stage
 COPY --from=builder /app/build/safeld /usr/local/bin/safeld
+
+# Diagnostic scripts under scripts/ need bcftools and awk.
+COPY scripts/ /usr/local/share/safeld/scripts/
 
 # --- Copy required shared libraries ---
 # Libraries from the Conda environment
@@ -60,7 +73,10 @@ RUN ldconfig
 WORKDIR /data
 
 # Make the binary executable
-RUN chmod +x /usr/local/bin/safeld
+RUN chmod +x /usr/local/bin/safeld /usr/local/share/safeld/scripts/*.sh
+
+# Fail the build rather than ship an image whose binary cannot start.
+RUN safeld --help > /dev/null && bcftools --version > /dev/null
 
 # Set the entrypoint to run the tool by default
 ENTRYPOINT ["safeld"]
