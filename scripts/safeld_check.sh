@@ -48,7 +48,7 @@ trap 'rm -f "$TMPQ"' EXIT
 echo "=================================================================="
 echo " safeld input check"
 echo " file    : $(basename "$VCF")"
-echo " sampled : ${NREC} records${REGION:+   region: $REGION}"
+if [ "$NREC" = "0" ]; then echo " sampled : all records${REGION:+   region: $REGION}"; else echo " sampled : ${NREC} records${REGION:+   region: $REGION}"; fi
 echo " filters : maf=$MAF  max-missing=$MAXMISS"
 echo " date    : $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 echo "=================================================================="
@@ -67,12 +67,15 @@ for tag in GT DS GP HDS; do
     echo "    FORMAT $tag declared      : yes (Number=$num)"
   fi
 done
+HAS_DS_HDR=$(bcftools view -h "$VCF" 2>/dev/null | grep -c 'FORMAT=<ID=DS,' || true)
 INFO_IDS=$(bcftools view -h "$VCF" 2>/dev/null | sed -n 's/^##INFO=<ID=\([^,]*\).*/\1/p' | tr '\n' ' ')
 echo "    INFO fields declared     : ${INFO_IDS:-<none>}"
 case " $INFO_IDS " in
   *" R2 "*|*" INFO "*|*" ER2 "*) ;;
-  *) echo "    note: no imputation-quality field (R2/INFO/ER2). The chr22 reference"
-     echo "          test used data pre-filtered at R2>=0.8; this file was not." ;;
+  *) if [ "$HAS_DS_HDR" -gt 0 ]; then
+       echo "    note: no imputation-quality field (R2/INFO/ER2). The chr22 reference"
+       echo "          test used data pre-filtered at R2>=0.8; this file was not."
+     fi ;;
 esac
 
 # ------------------------------------------------------------------ query ---
@@ -285,6 +288,10 @@ END {
 
   printf "\n[5] PREDICTED LD ATTENUATION UNDER -dosage-field DS\n"
   mdr = sum_ds_rate / nb
+  if (ds_absent_var == nb) {
+    printf "    DS is absent from every record, so -dosage-field DS is unusable and\n"
+    printf "    there is nothing to attenuate. This section does not apply.\n"
+  } else {
   printf "    Mean-imputing absent dosages attenuates a pair roughly by the\n"
   printf "    product of the two call rates:\n"
   printf "      mean DS presence %.3f  ->  r2=0.80 typically reads as %.3f\n", mdr, 0.80 * mdr * mdr
@@ -293,6 +300,7 @@ END {
     printf "    The gap between those lines IS the banding seen against original LD.\n"
   else
     printf "    DS is essentially complete; this is not your problem.\n"
+  }
 
   printf "\n[6] WHAT SAFELD WILL DO   (of %d biallelic variants; %d dropped as duplicates)\n", nb, ndup_dropped + 0
   printf "    %-6s %10s %10s %10s %10s\n", "mode", "kept", "drop:miss", "drop:maf", "drop:novar"
@@ -301,13 +309,20 @@ END {
     t = M[i]
     printf "    %-6s %10d %10d %10d %10d\n", t, KEEP[t] + 0, DROP_MISS[t] + 0, DROP_MAF[t] + 0, DROP_VAR[t] + 0
   }
-  if (auto_filled_var > 0) {
+  if (ds_absent_var == nb) {
+    printf "    DS is absent throughout, so auto reads GT directly: auto and GT are\n"
+    printf "    equivalent here and preprocess will not report any filling.\n"
+  } else if (auto_filled_var > 0) {
     printf "    auto filled %d absent DS call(s) across %d variant(s) from the\n", auto_filled_calls + 0, auto_filled_var + 0
     printf "    matching GT hard call (filled, not imputed).\n"
   }
 
   printf "\n[7] RECOMMENDATION\n"
-  if (mdr < 0.99 && sum_gt_rate / nb > 0.99) {
+  if (ds_absent_var == nb) {
+    printf "    Clean single-field input: GT only, %.1f%% complete. auto and GT are\n", 100 * sum_gt_rate / nb
+    printf "    equivalent. Compare against a HARD-CALL reference LD.\n"
+    printf "    If LD still disagrees, the parsing is exonerated: report -ntraits.\n"
+  } else if (mdr < 0.99 && sum_gt_rate / nb > 0.99) {
     printf "    DS is incomplete (%.1f%% mean) while GT is complete (%.1f%%).\n", 100 * mdr, 100 * sum_gt_rate / nb
     printf "    Absent DS is NOT a missing genotype here - GT knows it. safeld\n"
     printf "    default (-dosage-field auto) now fills each gap from the matching\n"
