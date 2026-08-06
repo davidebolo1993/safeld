@@ -104,6 +104,8 @@ Options:
   -maf FLOAT           MAF filter (default: 0.01)
   -max-missing FLOAT   Max fraction of missing calls per variant (default: 0.1)
   -dosage-field FIELD  auto|DS|GT: which FORMAT field to read (default: auto)
+                       auto measures both fields up front and picks; DS fills
+                       absent dosages from GT; GT ignores DS entirely
   -ntraits INT         Number of traits (default: 10)
   -chunk-size INT      Variants per chunk (default: 10000)
   -traits-per-tile INT Traits per tile (default: auto, ~1GB tiles)
@@ -214,6 +216,11 @@ Missingness is resolved during preprocessing, before standardization:
   dosages are derived from `GT` on the diploid 0–2 scale, normalized by each
   sample's own ploidy so a hemizygous ALT call (chrX/chrY in a male,
   mitochondria) scores 2.0 rather than being confused with a heterozygote.
+- **`preprocess` scans the head of the input before it starts** and reports what
+  it found: sample count, non-biallelic records, and the fraction of calls
+  carrying `GT` and `DS`. In `auto` mode it then picks the dosage source from
+  those measurements and says which it chose and why, so a run explains its own
+  input without a separate diagnostic step.
 - **`-dosage-field` matters for VCFs that carry both `GT` and `DS`.** Some
   exports (plink2 in particular) write the `DS` subfield for only a fraction of
   samples while `GT` stays complete — `0|1:0.97` sitting next to a bare `0|0`.
@@ -224,8 +231,7 @@ Missingness is resolved during preprocessing, before standardization:
   proportion to the `DS` presence rate — on a file with 30% `DS` coverage a true
   r² of 0.80 reads as 0.09 — which appears as distinct lower bands against the
   original LD. `-dosage-field GT` builds the matrix from hard calls throughout;
-  `-dosage-field DS` never falls back. Run `scripts/safeld_check.sh` on an input
-  to see its `DS` presence distribution and what each mode would keep.
+  `-dosage-field DS` keeps whatever `DS` exists and fills the rest from `GT`.
 - A genotype with **any** missing allele (`./1`) counts as missing outright; it
   is not silently scored as a reference call.
 - Variants whose missing fraction exceeds `-max-missing` are dropped and counted.

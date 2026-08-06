@@ -159,7 +159,7 @@ VCFProcessor::VCFProcessor(const std::string& vcf_file, double maf_filter,
                            double max_missing_rate, const std::string& temp_dir,
                            DosageField dosage_field)
     : vcf_file_(vcf_file), maf_filter_(maf_filter), max_missing_rate_(max_missing_rate),
-      dosage_field_(dosage_field), temp_dir_(temp_dir), vcf_fp_(nullptr),
+      dosage_field_(dosage_field), effective_field_(dosage_field), temp_dir_(temp_dir), vcf_fp_(nullptr),
       hdr_(nullptr), rec_(nullptr), use_info_af_(true), total_variants_(0),
       filtered_variants_(0), duplicate_variants_(0), multiallelic_variants_(0),
       missing_filtered_variants_(0), gt_fallback_variants_(0), gt_filled_calls_(0) {
@@ -279,6 +279,9 @@ bool VCFProcessor::initialize(const std::string& sample_list_str) {
         return false;
     }
 
+    scan_ = scanInput();
+    reportScanAndChooseField();
+
     logDebug("VCF processor initialized with " + std::to_string(target_samples_.size()) + " samples");
     return true;
 }
@@ -309,7 +312,7 @@ std::vector<std::string> VCFProcessor::getContigNames() const {
 // Imputation is deliberately left to the caller so that allele frequency and
 // missingness can be measured against real calls first.
 bool VCFProcessor::extractDosages(bcf1_t* rec, std::vector<double>& dosages, DosageStats& stats) {
-    if (dosage_field_ == DosageField::GT) {
+    if (effective_field_ == DosageField::GT) {
         return extractDosagesFromGT(rec, dosages, stats);
     }
 
@@ -320,9 +323,8 @@ bool VCFProcessor::extractDosages(bcf1_t* rec, std::vector<double>& dosages, Dos
     if (ret <= 0) {
         // No DS field on this record.
         free(ds_values);
-        if (dosage_field_ == DosageField::DS) {
-            return false;
-        }
+        // Forcing DS on a record that has none: the genotype is still known
+        // from GT, so read that rather than dropping the variant.
         return extractDosagesFromGT(rec, dosages, stats);
     }
 
@@ -331,9 +333,6 @@ bool VCFProcessor::extractDosages(bcf1_t* rec, std::vector<double>& dosages, Dos
     // other than one value per sample is a shape we cannot index by sample.
     if (n_samples <= 0 || n_values / n_samples != 1) {
         free(ds_values);
-        if (dosage_field_ == DosageField::DS) {
-            return false;
-        }
         return extractDosagesFromGT(rec, dosages, stats);
     }
 
@@ -371,7 +370,7 @@ bool VCFProcessor::extractDosages(bcf1_t* rec, std::vector<double>& dosages, Dos
     // GT - so mean-imputing it would invent data and attenuate every pairwise r2
     // in proportion to the DS presence rate. Fill each gap from that sample's own
     // hard call instead, keeping the real dosage wherever one was written.
-    if (dosage_field_ == DosageField::Auto && stats.observed_count < static_cast<int>(dosages.size())) {
+    if (stats.observed_count < static_cast<int>(dosages.size())) {
         std::vector<double> gt_dosages;
         DosageStats gt_stats;
         if (extractDosagesFromGT(rec, gt_dosages, gt_stats) &&
@@ -480,6 +479,192 @@ std::string VCFProcessor::makeSpoolPath() const {
         dir.pop_back();
     }
     return dir + "/safeld_dedup_XXXXXX";
+}
+
+// Reads the head of the file on a separate handle and summarises what it finds.
+// Cheap relative to the run and it removes the need for an external script.
+InputScan VCFProcessor::scanInput(int max_records) {
+    InputScan scan;
+    if (sample_indices_.empty()) {
+        return scan;
+    }
+
+    htsFile* fp = hts_open(vcf_file_.c_str(), "r");
+    if (!fp) {
+        return scan;
+    }
+    bcf_hdr_t* hdr = bcf_hdr_read(fp);
+    if (!hdr) {
+        hts_close(fp);
+        return scan;
+    }
+    bcf1_t* rec = bcf_init();
+    if (!rec) {
+        bcf_hdr_destroy(hdr);
+        hts_close(fp);
+        return scan;
+    }
+
+    scan.n_samples = static_cast<int>(sample_indices_.size());
+    scan.gt_declared = bcf_hdr_id2int(hdr, BCF_DT_ID, "GT") >= 0;
+    scan.ds_declared = bcf_hdr_id2int(hdr, BCF_DT_ID, "DS") >= 0;
+
+    const int file_samples = bcf_hdr_nsamples(hdr);
+    double ds_rate_sum = 0.0;
+    double gt_rate_sum = 0.0;
+
+    float* ds_values = nullptr;
+    int32_t* gt_arr = nullptr;
+    int n_ds = 0, n_gt = 0;
+
+    while (scan.records < max_records && bcf_read(fp, hdr, rec) == 0) {
+        scan.records++;
+        bcf_unpack(rec, BCF_UN_ALL);
+
+        if (rec->n_allele != 2) {
+            scan.multiallelic++;
+            continue;
+        }
+        scan.biallelic++;
+
+        if (!rec->d.id || rec->d.id[0] == '.') {
+            scan.no_id++;
+        }
+
+        int n_af = 0;
+        float* af_values = nullptr;
+        if (bcf_get_info_float(hdr, rec, "AF", &af_values, &n_af) > 0 && n_af > 0) {
+            scan.with_info_af++;
+        }
+        free(af_values);
+
+        // DS presence: htslib fills the missing sentinel for samples whose DS
+        // subfield was simply omitted, which is precisely what we want to count.
+        int ds_present = 0;
+        if (scan.ds_declared &&
+            bcf_get_format_float(hdr, rec, "DS", &ds_values, &n_ds) > 0 &&
+            file_samples > 0 && n_ds / file_samples == 1) {
+            for (int idx : sample_indices_) {
+                if (idx >= file_samples) continue;
+                float v = ds_values[idx];
+                if (!bcf_float_is_missing(v) && !bcf_float_is_vector_end(v) && v >= 0.0f) {
+                    ds_present++;
+                }
+            }
+        }
+        if (ds_present == 0) scan.ds_absent_records++;
+        ds_rate_sum += static_cast<double>(ds_present) / scan.n_samples;
+
+        int gt_called = 0;
+        if (scan.gt_declared && bcf_get_genotypes(hdr, rec, &gt_arr, &n_gt) > 0 && file_samples > 0) {
+            const int max_ploidy = n_gt / file_samples;
+            if (max_ploidy > 0) {
+                for (int idx : sample_indices_) {
+                    if (idx >= file_samples) continue;
+                    const int32_t* ptr = gt_arr + static_cast<size_t>(idx) * max_ploidy;
+                    bool ok = false;
+                    for (int p = 0; p < max_ploidy; ++p) {
+                        if (ptr[p] == bcf_int32_vector_end) break;
+                        if (bcf_gt_is_missing(ptr[p])) { ok = false; break; }
+                        ok = true;
+                    }
+                    if (ok) gt_called++;
+                }
+            }
+        }
+        gt_rate_sum += static_cast<double>(gt_called) / scan.n_samples;
+    }
+
+    free(ds_values);
+    free(gt_arr);
+    bcf_destroy(rec);
+    bcf_hdr_destroy(hdr);
+    hts_close(fp);
+
+    if (scan.biallelic > 0) {
+        scan.ds_presence  = ds_rate_sum / static_cast<double>(scan.biallelic);
+        scan.gt_call_rate = gt_rate_sum / static_cast<double>(scan.biallelic);
+    }
+    scan.ok = scan.records > 0;
+    return scan;
+}
+
+// Report what the scan found, then settle which FORMAT field the run will read.
+void VCFProcessor::reportScanAndChooseField() {
+    if (!scan_.ok) {
+        logWarning("Could not scan the input; proceeding without a summary");
+        effective_field_ = dosage_field_;
+        return;
+    }
+
+    std::ostringstream head;
+    head << "Input: " << formatCount(scan_.n_samples) << " samples, scanned "
+         << formatCount(scan_.records) << " records";
+    logInfo(head.str());
+
+    if (scan_.multiallelic > 0) {
+        logInfo("  " + formatCount(scan_.multiallelic) +
+                " non-biallelic (will be skipped; split with bcftools norm -m -any)");
+    }
+    if (scan_.biallelic == 0) {
+        logWarning("  no biallelic records in the scanned window");
+        effective_field_ = dosage_field_;
+        return;
+    }
+    if (scan_.no_id > 0) {
+        logDebug("  " + formatCount(scan_.no_id) + " records without an ID (deduplicated by locus)");
+    }
+    if (scan_.with_info_af == 0) {
+        logDebug("  no INFO/AF: allele frequencies will be computed from the genotypes");
+    }
+
+    auto pct = [](double v) {
+        std::ostringstream os;
+        os << std::fixed << std::setprecision(1) << (v * 100.0) << "%";
+        return os.str();
+    };
+
+    if (scan_.gt_declared) {
+        logInfo("  GT present for " + pct(scan_.gt_call_rate) + " of calls");
+    }
+    if (scan_.ds_declared) {
+        logInfo("  DS present for " + pct(scan_.ds_presence) + " of calls");
+    }
+
+    // Resolve Auto. The decision that matters: a file can carry GT for every
+    // sample while writing DS for only a fraction of them, and treating those
+    // absences as missing genotypes attenuates every pairwise r2 in proportion
+    // to the DS presence rate.
+    effective_field_ = dosage_field_;
+    if (dosage_field_ == DosageField::Auto) {
+        if (!scan_.ds_declared || scan_.ds_presence <= 0.0) {
+            effective_field_ = DosageField::GT;
+        } else if (scan_.ds_presence >= 1.0 - max_missing_rate_) {
+            effective_field_ = DosageField::DS;
+        } else if (scan_.gt_call_rate > scan_.ds_presence) {
+            effective_field_ = DosageField::GT;
+            logWarning("DS covers only " + pct(scan_.ds_presence) + " of calls while GT covers " +
+                       pct(scan_.gt_call_rate) + "; reading GT so the matrix comes from one "
+                       "complete field. Override with -dosage-field DS.");
+        } else {
+            effective_field_ = DosageField::DS;
+        }
+    }
+
+    if (dosage_field_ == DosageField::DS && !scan_.ds_declared) {
+        logWarning("-dosage-field DS was requested but the file declares no DS; "
+                   "reading GT hard calls instead.");
+        effective_field_ = DosageField::GT;
+    }
+    if (dosage_field_ == DosageField::GT && !scan_.gt_declared) {
+        logWarning("-dosage-field GT was requested but the file declares no GT; "
+                   "reading DS instead.");
+        effective_field_ = DosageField::DS;
+    }
+
+    const char* chosen = (effective_field_ == DosageField::GT) ? "GT" : "DS";
+    const char* how = (dosage_field_ == DosageField::Auto) ? " (auto)" : " (forced)";
+    logInfo(std::string("Dosage source: ") + chosen + how);
 }
 
 // stream variants with one-pass duplicate tracking.

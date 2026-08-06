@@ -27,6 +27,27 @@ struct Variant {
 //   GT   - hard calls only, ignore DS entirely.
 enum class DosageField { Auto, DS, GT };
 
+// What an up-front scan of the first records found. Reported at the start of
+// preprocessing and used to choose the dosage source in Auto mode, so the tool
+// explains its own input rather than needing a companion script.
+struct InputScan {
+    bool ok = false;
+    int n_samples = 0;
+    long long records = 0;
+    long long biallelic = 0;
+    long long multiallelic = 0;
+    long long with_info_af = 0;
+    long long no_id = 0;
+
+    bool ds_declared = false;
+    bool gt_declared = false;
+    // Mean fraction of the selected samples carrying a usable value, over the
+    // scanned biallelic records.
+    double ds_presence = 0.0;
+    double gt_call_rate = 0.0;
+    long long ds_absent_records = 0;
+};
+
 // Summary of the observed (non-missing) entries of one variant's dosage vector.
 // Collected while the missing sentinels are still in place so that allele
 // frequency and missingness are derived from real calls only.
@@ -41,6 +62,9 @@ private:
     double maf_filter_;
     double max_missing_rate_;
     DosageField dosage_field_;
+    // What the run will actually read, after Auto has consulted the scan.
+    DosageField effective_field_;
+    InputScan scan_;
     std::string temp_dir_;
     htsFile* vcf_fp_;
     bcf_hdr_t* hdr_;
@@ -66,6 +90,8 @@ private:
     void setupTargetSamples(const std::string& sample_list_str);
 
     bool extractDosages(bcf1_t* rec, std::vector<double>& dosages, DosageStats& stats);
+    // Chooses effective_field_ from the scan and reports the decision.
+    void reportScanAndChooseField();
     bool extractDosagesFromGT(bcf1_t* rec, std::vector<double>& dosages, DosageStats& stats);
     std::string makeSpoolPath() const;
 
@@ -82,6 +108,12 @@ public:
     using VariantCallback = std::function<void(std::unique_ptr<Variant>)>;
     void streamVariants(VariantCallback callback);
     std::vector<std::string> getContigNames() const;
+
+    // Reads up to max_records from a second handle on the same file and
+    // summarises it. Called by initialize(); exposed for callers that want the
+    // numbers without streaming.
+    InputScan scanInput(int max_records = 5000);
+    const InputScan& inputScan() const { return scan_; }
 
     const std::vector<std::string>& getTargetSamples() const { return target_samples_; }
     int getTotalVariants() const { return total_variants_; }
