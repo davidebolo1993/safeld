@@ -79,6 +79,9 @@ PgenSource::~PgenSource() { delete impl_; }
 
 void PgenSource::setExtractIds(std::vector<std::string> ids) {
     extract_ids_ = std::move(ids);
+    extract_set_.clear();
+    extract_set_.reserve(extract_ids_.size() * 2);
+    for (const auto& id : extract_ids_) extract_set_.insert(id);
 }
 
 std::vector<std::string> PgenSource::getContigNames() const {
@@ -160,6 +163,7 @@ bool PgenSource::loadBim(const std::string& path, std::string& error) {
     if (!in) { error = "cannot open " + path; return false; }
     variants_.clear();
     std::string line;
+    long long vidx = 0;
     while (std::getline(in, line)) {
         if (line.empty()) continue;
         std::istringstream ls(line);
@@ -170,8 +174,13 @@ bool PgenSource::loadBim(const std::string& path, std::string& error) {
             return false;
         }
         rec.biallelic = true;  // .bed is biallelic by construction
+        rec.vidx = vidx++;
+        if (!extract_set_.empty() && !extract_set_.contains(rec.id)) {
+            continue;
+        }
         variants_.push_back(std::move(rec));
     }
+    total_in_file_ = vidx;
     if (variants_.empty()) { error = "no variants in " + path; return false; }
     return true;
 }
@@ -184,6 +193,7 @@ bool PgenSource::loadPvar(const std::string& path, std::string& error) {
     }
     variants_.clear();
     std::string line;
+    long long vidx = 0;
     while (std::getline(in, line)) {
         if (line.empty() || line[0] == '#') continue;
         std::istringstream ls(line);
@@ -193,8 +203,17 @@ bool PgenSource::loadPvar(const std::string& path, std::string& error) {
             return false;
         }
         rec.biallelic = (rec.alt.find(',') == std::string::npos);
+        rec.vidx = vidx++;
+        // Skipping non-extracted records here rather than later keeps a
+        // targeted run on a whole-genome .pgen proportional to what was asked
+        // for: 17M records would otherwise be stored and indexed to return
+        // a thousand.
+        if (!extract_set_.empty() && !extract_set_.contains(rec.id)) {
+            continue;
+        }
         variants_.push_back(std::move(rec));
     }
+    total_in_file_ = vidx;
     if (variants_.empty()) {
         error = "no variants in " + path;
         return false;
@@ -223,7 +242,7 @@ bool PgenSource::openFile(std::string& error) {
 
     n_samples_ = static_cast<int>(sample_ids_.size());
     const uint32_t raw_sample_ct = static_cast<uint32_t>(n_samples_);
-    const uint32_t raw_variant_ct = static_cast<uint32_t>(variants_.size());
+    const uint32_t raw_variant_ct = static_cast<uint32_t>(total_in_file_);
 
     if (sample_indices_.empty()) {
         sample_indices_.resize(n_samples_);
@@ -285,10 +304,13 @@ bool PgenSource::openFile(std::string& error) {
     return true;
 }
 
-bool PgenSource::readVariant(long long vidx, bool prefer_dosage,
+// `index` is a position in variants_, which after an extract list is not the
+// record's index in the .pgen; pgenlib is addressed with the latter.
+bool PgenSource::readVariant(long long index, bool prefer_dosage,
                              std::vector<double>& dosages, DosageStats& stats,
                              long long* filled_from_hardcall) {
-    if (vidx < 0 || vidx >= static_cast<long long>(variants_.size())) return false;
+    if (index < 0 || index >= static_cast<long long>(variants_.size())) return false;
+    const long long vidx = variants_[index].vidx;
 
     const uint32_t sample_ct = static_cast<uint32_t>(n_samples_);
     plink2::PgrSampleSubsetIndex pssi;
@@ -394,8 +416,12 @@ bool PgenSource::initialize(const std::string& sample_list) {
     long long multiallelic = 0;
     for (const auto& v : variants_) if (!v.biallelic) multiallelic++;
 
-    logInfo("Input: " + formatCount(target_samples_.size()) + " samples, " +
-            formatCount(variants_.size()) + " variants (" + describe() + ")");
+    std::string head = "Input: " + formatCount(target_samples_.size()) + " samples, " +
+                       formatCount(total_in_file_) + " variants (" + describe() + ")";
+    if (static_cast<long long>(variants_.size()) != total_in_file_) {
+        head += "; " + formatCount(variants_.size()) + " match the extract list";
+    }
+    logInfo(head);
     if (multiallelic > 0) {
         logInfo("  " + formatCount(multiallelic) + " non-biallelic (will be skipped)");
     }
@@ -440,7 +466,8 @@ void PgenSource::chooseField() {
 
 void PgenSource::streamVariants(VariantCallback callback) {
     counts_ = SourceCounts{};
-    counts_.total = static_cast<long long>(variants_.size());
+    counts_.total = total_in_file_;
+    counts_.not_extracted = total_in_file_ - static_cast<long long>(variants_.size());
 
     std::unordered_set<std::string> extract;
     for (const auto& id : extract_ids_) extract.insert(id);
@@ -466,10 +493,7 @@ void PgenSource::streamVariants(VariantCallback callback) {
         const PgenVariantRecord& rec = variants_[v];
 
         if (!rec.biallelic) { counts_.multiallelic++; continue; }
-        if (!extract.empty()) {
-            if (!extract.contains(rec.id)) { counts_.not_extracted++; continue; }
-            seen.insert(rec.id);
-        }
+        if (!extract.empty()) seen.insert(rec.id);
 
         const std::string locus = rec.chrom + ":" + std::to_string(rec.pos) + ":" +
                                   rec.ref + ":" + rec.alt;
@@ -554,7 +578,8 @@ PgenScan PgenSource::scan(long long max_variants) {
         plink2::PgrSampleSubsetIndex pssi;
         plink2::PgrSetSampleSubsetIndex(nullptr, &impl_->pgr, &pssi);
         uint32_t dosage_ct = 0;
-        if (plink2::PgrGetD(nullptr, pssi, sample_ct, static_cast<uint32_t>(v), &impl_->pgr,
+        if (plink2::PgrGetD(nullptr, pssi, sample_ct,
+                            static_cast<uint32_t>(variants_[v].vidx), &impl_->pgr,
                             impl_->genovec.data(), impl_->dosage_present.data(),
                             impl_->dosage_main.data(), &dosage_ct) != plink2::kPglRetSuccess) {
             continue;

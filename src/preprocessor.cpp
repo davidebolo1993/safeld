@@ -325,13 +325,17 @@ void Preprocessor::run() {
     createOutputDirectories();
 
     std::unique_ptr<GenotypeSource> source = makeSource();
-    if (!source->initialize(config_.sample_list)) {
-        throw std::runtime_error("Failed to open the genotype input");
-    }
+
+    // Before initialize(), so a source with random access can skip records it
+    // was never asked for instead of loading and indexing the whole file.
     if (!config_.extract_file.empty()) {
         auto ids = readIdList(config_.extract_file);
         logInfo("Extract list: " + formatCount(ids.size()) + " variant IDs");
         source->setExtractIds(std::move(ids));
+    }
+
+    if (!source->initialize(config_.sample_list)) {
+        throw std::runtime_error("Failed to open the genotype input");
     }
 
     n_samples_ = static_cast<int>(source->getTargetSamples().size());

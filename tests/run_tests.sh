@@ -186,6 +186,32 @@ run preprocess --vcf "$DATA/matched.vcf" --out "$WORK/l" --ntraits 5 >/dev/null 
   || bad "double-dash spelling accepted throughout"
 
 if [ "$HAVE_PGEN" = "1" ]; then
+  # An extract list now filters the variant table as it loads, so a record's
+  # position in that table is no longer its index in the .pgen. Reading the same
+  # variants with and without the list must still give identical rows, or the
+  # translation between the two is wrong and every genotype is off by some
+  # offset.
+  run preprocess -bfile "$DATA/matched" -out "$WORK/x_all" -ntraits 5 >/dev/null 2>&1
+  run preprocess -bfile "$DATA/matched" -out "$WORK/x_sub" -ntraits 5 \
+      -extract "$DATA/extract.txt" >/dev/null 2>&1
+  if python3 - "$WORK/x_all" "$WORK/x_sub" <<'PYEOF'
+import sys
+def load(d):
+    meta = [l.split('\t')[1] for l in open(d + "/chunks/chunk_0.meta") if l.startswith("1\t")]
+    raw = open(d + "/chunks/chunk_0.bin", "rb").read()
+    n = len(meta); ns = len(raw) // 8 // n
+    return {meta[i]: raw[i*ns*8:(i+1)*ns*8] for i in range(n)}
+a, b = load(sys.argv[1]), load(sys.argv[2])
+shared = set(a) & set(b)
+sys.exit(0 if shared and all(a[p] == b[p] for p in shared) else 1)
+PYEOF
+  then
+    ok "extract-filtered read matches an unfiltered read of the same variants"
+  else
+    bad "extract-filtered read matches an unfiltered read of the same variants" \
+        "variant indices are mistranslated"
+  fi
+
   # Passing the full path used to append a second extension.
   run preprocess -pfile "$DATA/matched.bed" -out "$WORK/m" -ntraits 5 >/dev/null 2>&1 || true
   run preprocess -bfile "$DATA/matched.bed" -out "$WORK/n1" -ntraits 5 >/dev/null 2>&1

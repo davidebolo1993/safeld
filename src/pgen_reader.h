@@ -17,12 +17,16 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "genotype_source.h"
 #include "vcf_processor.h"  // Variant, DosageStats, DosageField
 
 struct PgenVariantRecord {
+    // Index of this record in the .pgen, which is not its position in the
+    // vector once an extract list has been applied.
+    long long vidx = 0;
     std::string chrom;
     std::string id;
     int pos = 0;
@@ -106,12 +110,17 @@ private:
     std::vector<std::string> extract_ids_;
 
     bool openFile(std::string& error);
+    // Non-empty once setExtractIds has run; consulted while loading the table.
+    std::unordered_set<std::string> extract_set_;
     void chooseField();
 
     struct Impl;
     Impl* impl_;
 
     int n_samples_ = 0;
+    // Records in the file, which exceeds variants_.size() once an extract list
+    // has been applied. pgenlib must be initialised with the true count.
+    long long total_in_file_ = 0;
     std::vector<std::string> sample_ids_;
     std::vector<PgenVariantRecord> variants_;
     std::vector<int> sample_indices_;
