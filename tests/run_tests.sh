@@ -169,6 +169,34 @@ out=$(run preprocess -vcf "$DATA/matched.vcf" -pfile "$DATA/matched" -out "$WORK
 grep -q "exactly one of" <<<"$out" && ok "two inputs at once is rejected" \
                                    || bad "two inputs at once is rejected"
 
+echo
+echo "argument handling"
+# An unrecognised flag used to be skipped in silence, so "--extract list.txt"
+# quietly processed the whole file instead of the listed variants.
+out=$(run preprocess -vcf "$DATA/matched.vcf" -out "$WORK/j" --not-a-flag 2>&1)
+grep -q "Unrecognised argument" <<<"$out" && ok "unknown argument is rejected, not ignored" \
+                                          || bad "unknown argument is rejected, not ignored"
+
+out=$(run preprocess -vcf "$DATA/matched.vcf" -out "$WORK/k" -ntraits 5 --extract "$DATA/extract.txt")
+[ "$(kept "$out")" = "20" ] && ok "--extract works as well as -extract" \
+                            || bad "--extract works as well as -extract" "kept $(kept "$out")"
+
+run preprocess --vcf "$DATA/matched.vcf" --out "$WORK/l" --ntraits 5 >/dev/null 2>&1 \
+  && ok "double-dash spelling accepted throughout" \
+  || bad "double-dash spelling accepted throughout"
+
+if [ "$HAVE_PGEN" = "1" ]; then
+  # Passing the full path used to append a second extension.
+  run preprocess -pfile "$DATA/matched.bed" -out "$WORK/m" -ntraits 5 >/dev/null 2>&1 || true
+  run preprocess -bfile "$DATA/matched.bed" -out "$WORK/n1" -ntraits 5 >/dev/null 2>&1
+  run preprocess -bfile "$DATA/matched"     -out "$WORK/n2" -ntraits 5 >/dev/null 2>&1
+  if cmp -s "$WORK/n1/chunks/chunk_0.bin" "$WORK/n2/chunks/chunk_0.bin"; then
+    ok "-bfile accepts a full path as well as a prefix"
+  else
+    bad "-bfile accepts a full path as well as a prefix"
+  fi
+fi
+
 # ------------------------------------------------------------- real data ----
 # Skipped unless tests/get_real_testdata.sh has been run. Synthetic fixtures
 # cannot produce stale INFO/AF, mixed record types or real allele frequency

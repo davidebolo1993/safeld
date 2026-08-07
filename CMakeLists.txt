@@ -67,8 +67,33 @@ endif()
 set(PLINK_NG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/plink-ng"
     CACHE PATH "Path to a plink-ng checkout")
 
+# Fetch the submodule if it is registered but empty. `git clone --recursive`
+# only initialises submodules present on the branch it cloned, so cloning the
+# default branch and checking out another one afterwards leaves external/
+# empty and pgen support silently off. Doing it here means `cmake ..` works
+# whatever route the checkout arrived by.
+if(NOT EXISTS "${PLINK_NG_DIR}/2.0/include/pgenlib_read.h"
+   AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.gitmodules"
+   AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+    find_package(Git QUIET)
+    if(GIT_FOUND)
+        message(STATUS "plink-ng submodule is not checked out; fetching it")
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive --depth 1
+                    -- external/plink-ng
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            RESULT_VARIABLE SAFELD_SUBMODULE_RC
+            OUTPUT_QUIET ERROR_VARIABLE SAFELD_SUBMODULE_ERR)
+        if(NOT SAFELD_SUBMODULE_RC EQUAL 0)
+            message(WARNING
+                "Could not fetch the plink-ng submodule, so .pgen/.bed support "
+                "will be off:\n${SAFELD_SUBMODULE_ERR}")
+        endif()
+    endif()
+endif()
+
 # Default ON when the submodule is actually present, so the common case needs no
-# flags and a clone without --recursive still configures instead of failing.
+# flags and a checkout without it still configures instead of failing.
 if(EXISTS "${PLINK_NG_DIR}/2.0/include/pgenlib_read.h")
     set(SAFELD_PGEN_DEFAULT ON)
 else()
@@ -77,8 +102,12 @@ endif()
 option(SAFELD_PGEN "Build native .pgen/.bed support (pgenlib, LGPL-3.0)" ${SAFELD_PGEN_DEFAULT})
 
 if(NOT SAFELD_PGEN AND NOT SAFELD_PGEN_DEFAULT)
-    message(STATUS "Native .pgen/.bed support: OFF (plink-ng submodule not found)")
-    message(STATUS "  run: git submodule update --init --depth 1 external/plink-ng")
+    # A warning rather than a status line: this is silently the difference
+    # between -pfile working and not, and it scrolls past unnoticed otherwise.
+    message(WARNING
+        "Native .pgen/.bed support is OFF: plink-ng was not found at ${PLINK_NG_DIR}.\n"
+        "  git submodule update --init --recursive --depth 1 external/plink-ng\n"
+        "then re-run cmake. -vcf is unaffected.")
 endif()
 
 if(SAFELD_PGEN)

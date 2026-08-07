@@ -51,6 +51,28 @@ void printUsage(const char* program_name) {
     std::cout << "    -h, --help           Show this help message\n\n";
 }
 
+namespace {
+
+// plink users type --extract out of habit and safeld's own flags take a single
+// dash, so accept both spellings. Everything is compared after normalisation.
+std::string normalizeFlag(const std::string& arg) {
+    if (arg.rfind("--", 0) == 0 && arg.size() > 2) {
+        return arg.substr(1);
+    }
+    return arg;
+}
+
+// An unrecognised argument used to be skipped without comment, so a mistyped or
+// wrong-dash flag silently did nothing: "--extract list.txt" left the extract
+// unapplied and processed the whole file instead.
+int unknownArgument(const char* program, const std::string& mode, const std::string& arg) {
+    logError("Unrecognised argument for '" + mode + "': " + arg);
+    std::cout << "\nUse: " << program << " " << mode << " --help for usage information\n";
+    return 1;
+}
+
+}  // namespace
+
 int main(int argc, char* argv[]) {
     try {
         if (argc < 2) {
@@ -78,8 +100,8 @@ int main(int argc, char* argv[]) {
             PreprocessConfig config;
 
             for (int i = 2; i < argc; ++i) {
-                std::string arg = argv[i];
-                if (arg == "-h" || arg == "--help") {
+                std::string arg = normalizeFlag(argv[i]);
+                if (arg == "-h" || arg == "-help") {
                     std::cout << "SAFELD Preprocessing\n\n";
                     std::cout << "Usage: " << argv[0] << " preprocess [OPTIONS]\n\n";
                     std::cout << "Options:\n";
@@ -106,10 +128,17 @@ int main(int argc, char* argv[]) {
                 if (arg == "-vcf" && i + 1 < argc) {
                     config.vcf_file = argv[++i];
                 } else if (arg == "-pfile" && i + 1 < argc) {
-                    config.genotype_file = std::string(argv[++i]) + ".pgen";
+                    // Accept both a prefix and a full path: appending the
+                    // extension unconditionally turned "x.pgen" into
+                    // "x.pgen.pgen" and reported a missing file.
+                    std::string v = argv[++i];
+                    config.genotype_file =
+                        (v.size() > 5 && v.compare(v.size() - 5, 5, ".pgen") == 0) ? v : v + ".pgen";
                     config.plink1_metadata = false;
                 } else if (arg == "-bfile" && i + 1 < argc) {
-                    config.genotype_file = std::string(argv[++i]) + ".bed";
+                    std::string v = argv[++i];
+                    config.genotype_file =
+                        (v.size() > 4 && v.compare(v.size() - 4, 4, ".bed") == 0) ? v : v + ".bed";
                     config.plink1_metadata = true;
                 } else if (arg == "-pgen" && i + 1 < argc) {
                     config.genotype_file = argv[++i];
@@ -164,6 +193,10 @@ int main(int argc, char* argv[]) {
                     config.chunk_size = std::stoi(argv[++i]);
                 } else if (arg == "-traits-per-tile" && i + 1 < argc) {
                     config.traits_per_tile = std::stoi(argv[++i]);
+                } else if (arg == "-verbose") {
+                    // handled globally
+                } else {
+                    return unknownArgument(argv[0], "preprocess", argv[i]);
                 }
             }
 
@@ -202,8 +235,8 @@ int main(int argc, char* argv[]) {
             SimulationConfig config;
 
             for (int i = 2; i < argc; ++i) {
-                std::string arg = argv[i];
-                if (arg == "-h" || arg == "--help") {
+                std::string arg = normalizeFlag(argv[i]);
+                if (arg == "-h" || arg == "-help") {
                     std::cout << "SAFELD Simulation\n\n";
                     std::cout << "Usage: " << argv[0] << " simulate [OPTIONS]\n\n";
                     std::cout << "Options:\n";
@@ -232,6 +265,10 @@ int main(int argc, char* argv[]) {
                     config.start_chunk = std::stoi(argv[++i]);
                 } else if (arg == "-end-chunk" && i + 1 < argc) {
                     config.end_chunk = std::stoi(argv[++i]);
+                } else if (arg == "-verbose") {
+                    // handled globally
+                } else {
+                    return unknownArgument(argv[0], "simulate", argv[i]);
                 }
             }
 
@@ -265,8 +302,8 @@ int main(int argc, char* argv[]) {
             config.compress_output = true;
 
             for (int i = 2; i < argc; ++i) {
-                std::string arg = argv[i];
-                if (arg == "-h" || arg == "--help") {
+                std::string arg = normalizeFlag(argv[i]);
+                if (arg == "-h" || arg == "-help") {
                     std::cout << "SAFELD Merge\n\n";
                     std::cout << "Usage: " << argv[0] << " merge [OPTIONS]\n\n";
                     std::cout << "Options:\n";
@@ -289,6 +326,10 @@ int main(int argc, char* argv[]) {
                     config.write_index = false;
                 } else if (arg == "-no-sort") {
                     config.enforce_sort = false;
+                } else if (arg == "-verbose") {
+                    // handled globally
+                } else {
+                    return unknownArgument(argv[0], "merge", argv[i]);
                 }
             }
 
