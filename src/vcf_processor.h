@@ -75,8 +75,11 @@ private:
 
     std::vector<std::string> target_samples_;
     std::vector<int> sample_indices_;
-    // INFO/AF describes every sample in the file, so it is only a valid filter
-    // when the whole cohort is being used.
+    // Whether to trust INFO/AF instead of computing the frequency from the
+    // genotypes. Off by default: the field is only correct if it describes
+    // exactly the samples present, and tools that subset samples routinely
+    // recompute AC and AN while leaving AF stale.
+    bool use_info_af_requested_;
     bool use_info_af_;
 
     int total_variants_;
@@ -108,7 +111,8 @@ public:
     // dropped. temp_dir: where the deduplication spool is written (empty = $TMPDIR).
     VCFProcessor(const std::string& vcf_file, double maf_filter,
                  double max_missing_rate = 0.1, const std::string& temp_dir = "",
-                 DosageField dosage_field = DosageField::Auto);
+                 DosageField dosage_field = DosageField::Auto,
+                 bool use_info_af = false);
     ~VCFProcessor();
 
     bool initialize(const std::string& sample_list = "") override;

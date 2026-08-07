@@ -157,10 +157,11 @@ void invalidateSpoolRecord(std::fstream& file, std::streamoff offset) {
 
 VCFProcessor::VCFProcessor(const std::string& vcf_file, double maf_filter,
                            double max_missing_rate, const std::string& temp_dir,
-                           DosageField dosage_field)
+                           DosageField dosage_field, bool use_info_af)
     : vcf_file_(vcf_file), maf_filter_(maf_filter), max_missing_rate_(max_missing_rate),
       dosage_field_(dosage_field), effective_field_(dosage_field), temp_dir_(temp_dir), vcf_fp_(nullptr),
-      hdr_(nullptr), rec_(nullptr), use_info_af_(true), total_variants_(0),
+      hdr_(nullptr), rec_(nullptr), use_info_af_requested_(use_info_af),
+      use_info_af_(false), total_variants_(0),
       filtered_variants_(0), duplicate_variants_(0), multiallelic_variants_(0),
       missing_filtered_variants_(0), gt_fallback_variants_(0), gt_filled_calls_(0) {
 }
@@ -250,15 +251,20 @@ void VCFProcessor::setupTargetSamples(const std::string& sample_list_str) {
                  std::to_string(requested_samples.size()) + " requested samples");
     }
 
-    // INFO/AF is computed over every sample in the file. Trusting it while the
-    // genotype matrix is built from a subset would filter variants on a frequency
-    // the matrix does not have, so fall back to recomputing AF from the selected
-    // samples whenever the cohort is not used in full.
-    use_info_af_ = (sample_indices_.size() == static_cast<size_t>(n_samples));
-    if (!use_info_af_) {
-        logInfo("Sample subset in use (" + std::to_string(sample_indices_.size()) + "/" +
-                std::to_string(n_samples) + "): INFO/AF ignored, allele frequencies "
-                "recomputed from the selected samples");
+    // INFO/AF is only a valid filter when it describes exactly these samples.
+    // Even without -samples that is not guaranteed: subsetting a VCF upstream
+    // typically recomputes AC and AN while leaving AF at its original value, so
+    // trusting it silently filters on a frequency the data does not have.
+    const bool whole_cohort = (sample_indices_.size() == static_cast<size_t>(n_samples));
+    use_info_af_ = use_info_af_requested_ && whole_cohort;
+    if (use_info_af_requested_ && !whole_cohort) {
+        logWarning("-use-info-af ignored: a sample subset is in use, so INFO/AF does "
+                   "not describe the selected samples.");
+    }
+    if (use_info_af_) {
+        logWarning("-use-info-af: filtering on INFO/AF without checking it. This is "
+                   "wrong if the field does not describe exactly the samples in this "
+                   "file, which upstream subsetting commonly breaks.");
     }
 }
 

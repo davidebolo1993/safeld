@@ -62,8 +62,24 @@ endif()
 #   git clone --depth 1 https://github.com/chrchang/plink-ng
 #   cmake -DSAFELD_PGEN=ON -DPLINK_NG_DIR=/path/to/plink-ng ..
 # ---------------------------------------------------------------------------
-option(SAFELD_PGEN "Build native .pgen support (requires plink-ng, LGPL-3.0)" OFF)
-set(PLINK_NG_DIR "" CACHE PATH "Path to a plink-ng checkout")
+# plink-ng ships as a submodule, so `git clone --recursive` then `cmake ..` is
+# all that is needed. Point PLINK_NG_DIR elsewhere to use your own checkout.
+set(PLINK_NG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/plink-ng"
+    CACHE PATH "Path to a plink-ng checkout")
+
+# Default ON when the submodule is actually present, so the common case needs no
+# flags and a clone without --recursive still configures instead of failing.
+if(EXISTS "${PLINK_NG_DIR}/2.0/include/pgenlib_read.h")
+    set(SAFELD_PGEN_DEFAULT ON)
+else()
+    set(SAFELD_PGEN_DEFAULT OFF)
+endif()
+option(SAFELD_PGEN "Build native .pgen/.bed support (pgenlib, LGPL-3.0)" ${SAFELD_PGEN_DEFAULT})
+
+if(NOT SAFELD_PGEN AND NOT SAFELD_PGEN_DEFAULT)
+    message(STATUS "Native .pgen/.bed support: OFF (plink-ng submodule not found)")
+    message(STATUS "  run: git submodule update --init --depth 1 external/plink-ng")
+endif()
 
 if(SAFELD_PGEN)
     if(NOT PLINK_NG_DIR)
@@ -71,10 +87,12 @@ if(SAFELD_PGEN)
     endif()
     set(PGENLIB_INCLUDE "${PLINK_NG_DIR}/2.0/include")
     if(NOT EXISTS "${PGENLIB_INCLUDE}/pgenlib_read.h")
-        message(FATAL_ERROR "pgenlib_read.h not found under ${PGENLIB_INCLUDE}")
+        message(FATAL_ERROR
+            "pgenlib_read.h not found under ${PGENLIB_INCLUDE}.\n"
+            "Run: git submodule update --init --depth 1 external/plink-ng")
     endif()
     if(NOT EXISTS "${PLINK_NG_DIR}/2.0/simde")
-        message(FATAL_ERROR "plink-ng's vendored simde/ is missing; clone without --sparse")
+        message(FATAL_ERROR "plink-ng's vendored simde/ is missing; a sparse checkout will not compile")
     endif()
 
     add_library(pgenlib SHARED

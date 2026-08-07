@@ -222,6 +222,13 @@ Missingness is resolved during preprocessing, before standardization:
   dosages are derived from `GT` on the diploid 0–2 scale, normalized by each
   sample's own ploidy so a hemizygous ALT call (chrX/chrY in a male,
   mitochondria) scores 2.0 rather than being confused with a heterozygote.
+- **Allele frequencies are computed from the genotypes**, not read from
+  `INFO/AF`. That field is only correct if it describes exactly the samples in
+  the file, and tools that subset samples routinely recompute `AC` and `AN`
+  while leaving `AF` untouched — a 1000 Genomes subset carried `AC=4;AN=400`
+  next to a stale `AF=0.0066`, so the true frequency was 0.01 and a `-maf 0.01`
+  run silently dropped the variant. `-use-info-af` restores the old behaviour
+  where the field is known to be trustworthy.
 - **`preprocess` scans the head of the input before it starts** and reports what
   it found: sample count, non-biallelic records, and the fraction of calls
   carrying `GT` and `DS`. In `auto` mode it then picks the dosage source from
@@ -275,15 +282,25 @@ trouble: exporting a hard-call pgen with `--export vcf vcf-dosage=DS` writes the
 resulting VCF cannot be read correctly without knowing that. A `.pgen` records
 dosage presence explicitly per sample, so the ambiguity does not arise.
 
+plink-ng ships as a submodule, so nothing extra is needed:
+
 ```bash
-git clone --depth 1 https://github.com/chrchang/plink-ng
-cmake -DSAFELD_PGEN=ON -DPLINK_NG_DIR=/path/to/plink-ng ..
+git clone --recursive https://github.com/davidebolo1993/safeld
+cd safeld && mkdir build && cd build && cmake .. && make -j $(nproc)
 ```
 
-A full clone is needed: plink-ng's vendored `simde/` is required to compile.
-pgenlib is LGPL-3.0 and is built as a shared library; safeld itself stays MIT.
-Without this option `-pfile`/`-bfile` report a clear error and `-vcf` is
-unaffected.
+If you already cloned without `--recursive`:
+
+```bash
+git submodule update --init --depth 1 external/plink-ng
+```
+
+Support switches itself on when the submodule is present and off when it is
+not, so a plain clone still builds; `-pfile`/`-bfile` then report a clear error
+and `-vcf` is unaffected. Use `-DPLINK_NG_DIR=...` to point at your own checkout.
+
+pgenlib is LGPL-3.0 and is built as a shared library so it can be replaced;
+safeld itself stays MIT.
 
 ### Subsetting
 
@@ -305,13 +322,30 @@ preprocessing says so rather than quietly keeping fewer variants than expected.
 tests/run_tests.sh build/safeld
 ```
 
-The central check writes the same genotypes as both a VCF and a plink1 `.bed`,
-then requires the two readers to produce byte-identical standardized matrices —
-so a reader bug shows up as disagreement rather than as plausible output. The
+Synthetic fixtures are generated on the fly, so this needs nothing but Python.
+The central check writes the same genotypes as both a VCF and a plink1 `.bed`
+and requires the two readers to produce byte-identical standardized matrices —
+a reader bug then shows up as disagreement rather than as plausible output. The
 rest cover the input pathologies that caused real failures: ID-less records,
 duplicate loci and IDs, multiallelic sites, all-missing and monomorphic
-variants, and sparse `DS`. Tests needing `.bed` skip themselves when built
-without `SAFELD_PGEN`.
+variants, and sparse `DS`.
+
+For the real-data checks, which need `bcftools`, `plink2` and network access:
+
+```bash
+tests/get_real_testdata.sh                 # 100 kb of 1000 Genomes chr22
+tests/run_tests.sh build/safeld tests/.work tests/realdata
+```
+
+That builds the same region as VCF, BCF, `.pgen` and `.bed` and requires all
+four to agree byte for byte. It is worth the extra step: it immediately caught a
+bug the synthetic fixtures could not, since plink2 recomputes `AC` and `AN` when
+subsetting samples but leaves `INFO/AF` at its original value, so filtering on
+`INFO/AF` silently used a frequency the data did not have. That region also has
+no rsIDs at all, which is the pathology that broke the original tool, here
+occurring in real data rather than a constructed fixture.
+
+Tests needing `.bed`/`.pgen` skip themselves when built without `SAFELD_PGEN`.
 
 ### Dependencies
 

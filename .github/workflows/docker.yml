@@ -1,18 +1,51 @@
-name: Docker CI
+name: CI
+
 on:
   push:
     branches: ['**']
   pull_request:
 
 jobs:
-  # Build on every branch and PR without publishing, so a broken Dockerfile is
-  # caught before it reaches main and gets pushed to :latest.
-  build:
+  # Compile and run the test suite directly, which fails faster and with better
+  # messages than a container build when the break is in the C++.
+  build-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config \
+            libhts-dev libopenblas-dev libomp-dev bcftools
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Report build configuration
+        run: cmake -L build 2>/dev/null | grep -E 'SAFELD_PGEN|SAFELD_NATIVE' || true
+
+      - name: Build
+        run: cmake --build build -j "$(nproc)"
+
+      - name: Test
+        run: tests/run_tests.sh build/safeld
+
+  # Build the image on every branch and pull request without publishing, so a
+  # broken Dockerfile is caught before it reaches main and is pushed to :latest.
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
       - name: Build image (no push)
         uses: docker/build-push-action@v5
         with:
@@ -20,28 +53,47 @@ jobs:
           push: false
           load: true
           tags: safeld:ci
+
+      # Fixtures are generated on the runner rather than in the container, so
+      # the image does not need a Python interpreter it would otherwise never use.
       - name: Smoke test
         run: |
-          docker run --rm safeld:ci --help
-          docker run --rm --entrypoint bcftools safeld:ci --version
-          docker run --rm --entrypoint sh safeld:ci -c \
-            'ls /usr/local/share/safeld/scripts/'
+          set -euo pipefail
+          python3 tests/make_testdata.py "$PWD/ci-data"
+          docker run --rm safeld:ci --help > /dev/null
+          docker run --rm --entrypoint bcftools safeld:ci --version > /dev/null
+          docker run --rm --entrypoint ls safeld:ci /usr/local/share/safeld/scripts/
+          docker run --rm -v "$PWD/ci-data:/data" safeld:ci \
+            preprocess -vcf /data/matched.vcf -out /data/prep -ntraits 5
+          docker run --rm -v "$PWD/ci-data:/data" safeld:ci \
+            simulate -prep /data/prep -out /data/sim
+          docker run --rm -v "$PWD/ci-data:/data" safeld:ci \
+            merge -in /data/sim -out /data/final.vcf -no-compress
+          n=$(grep -vc '^#' ci-data/final.vcf)
+          echo "merged VCF carries $n variants"
+          test "$n" = "60"
 
   publish:
-    needs: build
+    needs: [build-and-test, docker-build]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
       - name: Login to DockerHub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
+
       - name: Build and push
         uses: docker/build-push-action@v5
         with:

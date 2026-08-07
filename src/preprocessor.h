@@ -27,6 +27,7 @@ struct PreprocessConfig {
     std::string samples_file;                  // .psam or .fam (optional override)
     bool plink1_metadata = false;              // bed/bim/fam rather than pgen/pvar/psam
     std::string extract_file;                  // variant ID list, one per line
+    bool use_info_af = false;                  // trust INFO/AF rather than recomputing
 };
 
 struct ChunkMetadata {

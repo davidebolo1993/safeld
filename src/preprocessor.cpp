@@ -315,7 +315,7 @@ std::unique_ptr<GenotypeSource> Preprocessor::makeSource() {
     }
     return std::make_unique<VCFProcessor>(config_.vcf_file, config_.maf_filter,
                                           config_.max_missing_rate, config_.output_dir,
-                                          config_.dosage_field);
+                                          config_.dosage_field, config_.use_info_af);
 }
 
 void Preprocessor::run() {

@@ -1,7 +1,7 @@
 # =============================================================================
 # Build Stage: Compile the application in a full Conda environment
 # =============================================================================
-FROM condaforge/mambaforge:latest as builder
+FROM condaforge/miniforge3:latest AS builder
 
 # Set the working directory
 WORKDIR /app
@@ -18,17 +18,22 @@ SHELL ["mamba", "run", "-n", "safeld_conda_environment", "/bin/bash", "-c"]
 COPY CMakeLists.txt .
 COPY src/ ./src/
 COPY scripts/ ./scripts/
+# Present only when the repository was checked out with submodules. CMake turns
+# native .pgen/.bed support off by itself when this directory is missing, so the
+# image still builds either way.
+COPY external/ ./external/
 
 # Build the application using your original CMakeLists.txt
 # SAFELD_NATIVE stays off: an image built on one CPU must run on another.
 RUN mkdir build && cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release -DSAFELD_NATIVE=OFF .. && \
-    make -j$(nproc)
+    make -j$(nproc) && \
+    ./safeld --help > /dev/null
 
 # =============================================================================
 # Final Stage: Create a minimal, portable image
 # =============================================================================
-FROM ubuntu:22.04 as final
+FROM ubuntu:22.04 AS final
 
 LABEL maintainer="davide.bolognini@fht.org"
 LABEL version="0.0.1"
@@ -44,6 +49,11 @@ RUN apt-get update && \
 
 # Copy the compiled executable from the build stage
 COPY --from=builder /app/build/safeld /usr/local/bin/safeld
+
+# libpgenlib is built as a shared library (LGPL relinking), so it must travel
+# with the binary. The wildcard keeps this working when the image is built from
+# a checkout without submodules, where no such library exists.
+COPY --from=builder /app/build/libpgenlib.s[o] /usr/local/lib/
 
 # Diagnostic scripts under scripts/ need bcftools and awk.
 COPY scripts/ /usr/local/share/safeld/scripts/
@@ -73,7 +83,7 @@ RUN ldconfig
 WORKDIR /data
 
 # Make the binary executable
-RUN chmod +x /usr/local/bin/safeld /usr/local/share/safeld/scripts/*.sh
+RUN chmod +x /usr/local/bin/safeld && chmod -R a+rX /usr/local/share/safeld/scripts
 
 # Fail the build rather than ship an image whose binary cannot start.
 RUN safeld --help > /dev/null && bcftools --version > /dev/null

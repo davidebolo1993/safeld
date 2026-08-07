@@ -17,6 +17,7 @@ void printUsage(const char* program_name) {
     std::cout << "    -out DIR             Output directory for preprocessed data\n";
     std::cout << "    -samples LIST        Comma-separated sample IDs, or a file with one per line\n";
     std::cout << "    -extract FILE        Keep only these variant IDs, one per line\n";
+    std::cout << "    -use-info-af         Filter on INFO/AF instead of recomputing (see README)\n";
     std::cout << "    -maf FLOAT           MAF filter (default: 0.01)\n";
     std::cout << "    -max-missing FLOAT   Max fraction of missing calls per variant (default: 0.1)\n";
     std::cout << "    -dosage-field FIELD  auto|DS|GT: which FORMAT field to read (default: auto)\n";
@@ -116,15 +117,26 @@ int main(int argc, char* argv[]) {
                     config.variants_file = argv[++i];
                 } else if (arg == "-psam" && i + 1 < argc) {
                     config.samples_file = argv[++i];
+                } else if (arg == "-use-info-af") {
+                    config.use_info_af = true;
                 } else if (arg == "-extract" && i + 1 < argc) {
                     config.extract_file = argv[++i];
                 } else if (arg == "-out" && i + 1 < argc) {
                     config.output_dir = argv[++i];
                 } else if (arg == "-samples" && i + 1 < argc) {
                     // Accept either a comma-separated list or a file of IDs, so
-                    // a subset does not have to fit on a command line.
+                    // a subset does not have to fit on a command line. Anything
+                    // that looks like a path must exist: silently treating a
+                    // mistyped filename as a sample ID produces the confusing
+                    // "none of the requested samples are present" much later.
                     std::string value = argv[++i];
                     std::ifstream probe(value);
+                    const bool looks_like_path =
+                        value.find('/') != std::string::npos && value.find(',') == std::string::npos;
+                    if (looks_like_path && !probe.good()) {
+                        logError("Sample list file not found: " + value);
+                        return 1;
+                    }
                     if (probe.good() && value.find(',') == std::string::npos) {
                         auto ids = readIdList(value);
                         std::string joined;

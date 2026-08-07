@@ -19,6 +19,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SAFELD="${1:-$HERE/../build/safeld}"
 WORK="${2:-$HERE/.work}"
+REAL="${3:-$HERE/realdata}"      # optional; see get_real_testdata.sh
 
 if [ ! -x "$SAFELD" ]; then
   echo "safeld binary not found at $SAFELD" >&2
@@ -167,6 +168,60 @@ fi
 out=$(run preprocess -vcf "$DATA/matched.vcf" -pfile "$DATA/matched" -out "$WORK/i" 2>&1)
 grep -q "exactly one of" <<<"$out" && ok "two inputs at once is rejected" \
                                    || bad "two inputs at once is rejected"
+
+# ------------------------------------------------------------- real data ----
+# Skipped unless tests/get_real_testdata.sh has been run. Synthetic fixtures
+# cannot produce stale INFO/AF, mixed record types or real allele frequency
+# spectra, and every one of those has hidden a bug at some point.
+echo
+echo "real data (1000 Genomes chr22)"
+if [ -f "$REAL/real_ids.vcf" ] && [ -f "$REAL/real.vcf.gz" ]; then
+  declare -a names=(vcf bcf)
+  run preprocess -vcf "$REAL/real_ids.vcf" -out "$WORK/r_vcf" -ntraits 10 >/dev/null
+  run preprocess -vcf "$REAL/real_ids.bcf" -out "$WORK/r_bcf" -ntraits 10 >/dev/null
+  if [ "$HAVE_PGEN" = "1" ]; then
+    run preprocess -pfile "$REAL/real_ids" -out "$WORK/r_pgen" -ntraits 10 >/dev/null
+    run preprocess -bfile "$REAL/real_ids" -out "$WORK/r_bed"  -ntraits 10 >/dev/null
+    names+=(pgen bed)
+  fi
+
+  n_vcf=$(grep -c '^22' "$WORK/r_vcf/chunks/chunk_0.meta" || echo 0)
+  [ "$n_vcf" -gt 100 ] && ok "real VCF keeps $n_vcf variants" \
+                       || bad "real VCF keeps a plausible number of variants" "got $n_vcf"
+
+  same=1
+  for f in "${names[@]:1}"; do
+    cmp -s "$WORK/r_vcf/chunks/chunk_0.bin" "$WORK/r_${f}/chunks/chunk_0.bin" || { same=0; echo "        $f differs"; }
+  done
+  if [ "$same" = "1" ]; then
+    ok "all ${#names[@]} formats agree byte for byte on real data (${names[*]})"
+  else
+    bad "all formats agree byte for byte on real data"
+  fi
+
+  # Every ID in this region is "." — the pathology that broke the original tool,
+  # here in real data rather than a constructed fixture.
+  out=$(run preprocess -vcf "$REAL/real.vcf.gz" -out "$WORK/r_dots" -ntraits 5)
+  k=$(kept "$out")
+  [ "${k:-0}" -gt 100 ] && ok "real VCF with no rsIDs at all keeps $k variants" \
+                        || bad "real VCF with no rsIDs keeps variants" "kept ${k:-0}"
+  grep -q "non-biallelic" <<<"$out" && ok "real multiallelic and symbolic records skipped" \
+                                    || bad "real multiallelic and symbolic records skipped"
+
+  if [ "$HAVE_PGEN" = "1" ]; then
+    a=$(run preprocess -pfile "$REAL/real_ids" -out "$WORK/r_ex_p" -ntraits 5 \
+            -extract "$REAL/extract_ids.txt" -samples "$REAL/subset_samples.txt")
+    b=$(run preprocess -vcf "$REAL/real_ids.vcf" -out "$WORK/r_ex_v" -ntraits 5 \
+            -extract "$REAL/extract_ids.txt" -samples "$REAL/subset_samples.txt")
+    if cmp -s "$WORK/r_ex_p/chunks/chunk_0.bin" "$WORK/r_ex_v/chunks/chunk_0.bin"; then
+      ok "real data, both subsets, pgen and VCF still agree"
+    else
+      bad "real data, both subsets, pgen and VCF still agree"
+    fi
+  fi
+else
+  skip "real-data checks (run tests/get_real_testdata.sh first)"
+fi
 
 echo
 printf "  %d passed, %d failed" "$PASS" "$FAIL"
