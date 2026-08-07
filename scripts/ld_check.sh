@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 #
 # ld_check.sh - run safeld two ways from one .pgen and report how well the
 # simulated LD matches the original.
@@ -24,8 +24,14 @@
 # Example:
 #   scripts/ld_check.sh -p /path/GRCh38_ukb_processed_autosomes \
 #                       -e ../snp_chr1.txt -o ldcheck_chr1
+#
+# Written for POSIX sh so that "sh ld_check.sh" behaves the same as running it
+# directly. Two things bit this before: "set -o pipefail" is not POSIX, and in
+# dash the whole set command then fails, leaving -e off so the script carries on
+# past errors; and brace expansion is a bashism, so mkdir -p out/{a,b} makes one
+# directory literally named "{a,b}".
 
-set -euo pipefail
+set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
@@ -48,15 +54,42 @@ while getopts "p:e:o:n:m:w:s:k:h" opt; do
     *) exit 2 ;;
   esac
 done
+shift $((OPTIND - 1))
 
-[ -n "$PGEN" ] && [ -n "$EXTRACT" ] && [ -n "$OUT" ] || {
-  echo "need -p, -e and -o; see -h" >&2; exit 2; }
+# Everything is a flag; a bare path here is almost always a binary that was
+# meant to follow -s or -k, and silently ignoring it leaves the run using the
+# wrong tool.
+if [ "$#" -gt 0 ]; then
+  echo "unexpected argument: $1" >&2
+  echo "  binaries go after -s (safeld) and -k (plink2); see -h" >&2
+  exit 2
+fi
+
+if [ -z "$PGEN" ] || [ -z "$EXTRACT" ] || [ -z "$OUT" ]; then
+  echo "need -p, -e and -o; see -h" >&2
+  exit 2
+fi
 
 PGEN="${PGEN%.pgen}"
 
-mkdir -p "$OUT"/{input,from_vcf,from_pgen,original}
+command -v "$PLINK2" >/dev/null 2>&1 || { echo "plink2 not found: $PLINK2 (use -k)" >&2; exit 2; }
+[ -x "$SAFELD" ] || command -v "$SAFELD" >/dev/null 2>&1 || {
+  echo "safeld not found: $SAFELD (use -s)" >&2; exit 2; }
+[ -f "$PGEN.pgen" ] || { echo "no such file: $PGEN.pgen" >&2; exit 2; }
+[ -f "$EXTRACT" ]   || { echo "no such file: $EXTRACT" >&2; exit 2; }
+
+# One mkdir per directory: brace expansion is not POSIX.
+mkdir -p "$OUT"
+mkdir -p "$OUT/input"
+mkdir -p "$OUT/from_vcf"
+mkdir -p "$OUT/from_pgen"
+mkdir -p "$OUT/original"
 OUT="$(cd "$OUT" && pwd)"
 EXTRACT="$(cd "$(dirname "$EXTRACT")" && pwd)/$(basename "$EXTRACT")"
+case "$SAFELD" in
+  /*) ;;
+  *) [ -x "$SAFELD" ] && SAFELD="$(cd "$(dirname "$SAFELD")" && pwd)/$(basename "$SAFELD")" ;;
+esac
 
 echo "safeld  : $SAFELD"
 echo "plink2  : $PLINK2"
