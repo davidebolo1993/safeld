@@ -44,6 +44,13 @@ find_package(PkgConfig REQUIRED)
 # Find htslib
 pkg_check_modules(HTSLIB REQUIRED htslib)
 
+# pkg-config reports the library directory separately from the library name.
+# Without this the link works only when htslib happens to sit in a default
+# search path, and fails on Homebrew/Cellar or any non-standard prefix.
+if(HTSLIB_LIBRARY_DIRS)
+    link_directories(${HTSLIB_LIBRARY_DIRS})
+endif()
+
 # ---------------------------------------------------------------------------
 # Optional native .pgen support via plink-ng's pgenlib.
 #

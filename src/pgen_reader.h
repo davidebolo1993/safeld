@@ -19,7 +19,8 @@
 #include <string>
 #include <vector>
 
-#include "vcf_processor.h"  // Variant, DosageStats
+#include "genotype_source.h"
+#include "vcf_processor.h"  // Variant, DosageStats, DosageField
 
 struct PgenVariantRecord {
     std::string chrom;
@@ -43,18 +44,36 @@ struct PgenScan {
     double hardcall_rate = 0.0;
 };
 
-class PgenSource {
+class PgenSource : public GenotypeSource {
 public:
-    PgenSource();
-    ~PgenSource();
+    // metadata_style picks which sidecar pair to read: Pvar for .pvar/.psam
+    // (plink 2), Bim for .bim/.fam (plink 1). A .bed is read through the same
+    // pgenlib entry points as a .pgen; it simply never carries dosages.
+    enum class Metadata { Pvar, Bim };
+
+    PgenSource(const std::string& genotype_path, Metadata metadata,
+               double maf_filter, double max_missing_rate, DosageField dosage_field);
+    ~PgenSource() override;
 
     PgenSource(const PgenSource&) = delete;
     PgenSource& operator=(const PgenSource&) = delete;
 
-    // pgen_path is the .pgen; .pvar and .psam are derived from the same stem
-    // unless given explicitly. Returns false with a message in `error`.
-    bool open(const std::string& pgen_path, std::string& error,
-              const std::string& pvar_path = "", const std::string& psam_path = "");
+    // GenotypeSource
+    bool initialize(const std::string& sample_list) override;
+    void streamVariants(VariantCallback callback) override;
+    const std::vector<std::string>& getTargetSamples() const override { return target_samples_; }
+    std::vector<std::string> getContigNames() const override;
+    const SourceCounts& counts() const override { return counts_; }
+    void setExtractIds(std::vector<std::string> ids) override;
+    std::string describe() const override {
+        return metadata_ == Metadata::Bim ? "bed/bim/fam" : "pgen/pvar/psam";
+    }
+
+    // Explicit sidecar paths; otherwise derived from the genotype file stem.
+    void setMetadataPaths(const std::string& variants, const std::string& samples) {
+        variants_path_ = variants;
+        samples_path_ = samples;
+    }
 
     int nSamples() const { return n_samples_; }
     long long nVariants() const { return static_cast<long long>(variants_.size()); }
@@ -73,10 +92,22 @@ public:
                      std::vector<double>& dosages, DosageStats& stats,
                      long long* filled_from_hardcall = nullptr);
 
-    // Restricts subsequent reads to these sample indices, in this order.
-    void setSampleSubset(const std::vector<int>& indices);
-
 private:
+    std::string genotype_path_;
+    Metadata metadata_;
+    double maf_filter_;
+    double max_missing_rate_;
+    DosageField dosage_field_;
+    DosageField effective_field_ = DosageField::Auto;
+    std::string variants_path_;
+    std::string samples_path_;
+    std::vector<std::string> target_samples_;
+    SourceCounts counts_;
+    std::vector<std::string> extract_ids_;
+
+    bool openFile(std::string& error);
+    void chooseField();
+
     struct Impl;
     Impl* impl_;
 
@@ -89,4 +120,6 @@ private:
 
     bool loadPvar(const std::string& path, std::string& error);
     bool loadPsam(const std::string& path, std::string& error);
+    bool loadBim(const std::string& path, std::string& error);
+    bool loadFam(const std::string& path, std::string& error);
 };

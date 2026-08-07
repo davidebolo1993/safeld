@@ -1,5 +1,8 @@
 #include "preprocessor.h"
 #include "vcf_processor.h"
+#ifdef SAFELD_HAVE_PGEN
+#include "pgen_reader.h"
+#endif
 #include "utils.h"
 #include <fstream>
 #include <sstream>
@@ -165,7 +168,7 @@ void Preprocessor::saveTraitsMetadata(const TraitsMetadata& meta) {
     logDebug("Saved traits metadata");
 }
 
-void Preprocessor::processAndChunkVCF(VCFProcessor& processor) {
+void Preprocessor::processAndChunkVCF(GenotypeSource& source) {
     Timer timer("VCF processing and chunking");
 
     logDebug("Chunk size: " + formatCount(config_.chunk_size) + " variants");
@@ -183,7 +186,7 @@ void Preprocessor::processAndChunkVCF(VCFProcessor& processor) {
     current_meta.refs.reserve(config_.chunk_size);
     current_meta.alts.reserve(config_.chunk_size);
 
-    processor.streamVariants([&](std::unique_ptr<Variant> variant) {
+    source.streamVariants([&](std::unique_ptr<Variant> variant) {
         std::vector<double> standardized;
         if (!standardize(variant->dosages, standardized)) {
             // Zero variance across the selected samples: the variant carries no
@@ -289,27 +292,54 @@ void Preprocessor::saveChunkMetadata(const ChunkMetadata& meta) {
     }
 }
 
+// Builds the reader for whichever input was given. The deduplication spool used
+// by the VCF path lives next to the output, since it holds a full copy of the
+// genotype matrix; the pgen path needs no spool because it can see the whole
+// variant table up front.
+std::unique_ptr<GenotypeSource> Preprocessor::makeSource() {
+    if (!config_.genotype_file.empty()) {
+#ifdef SAFELD_HAVE_PGEN
+        auto src = std::make_unique<PgenSource>(
+            config_.genotype_file,
+            config_.plink1_metadata ? PgenSource::Metadata::Bim : PgenSource::Metadata::Pvar,
+            config_.maf_filter, config_.max_missing_rate, config_.dosage_field);
+        if (!config_.variants_file.empty() || !config_.samples_file.empty()) {
+            src->setMetadataPaths(config_.variants_file, config_.samples_file);
+        }
+        return src;
+#else
+        throw std::runtime_error(
+            "This build has no .pgen/.bed support. Rebuild with "
+            "-DSAFELD_PGEN=ON -DPLINK_NG_DIR=/path/to/plink-ng, or convert to VCF first.");
+#endif
+    }
+    return std::make_unique<VCFProcessor>(config_.vcf_file, config_.maf_filter,
+                                          config_.max_missing_rate, config_.output_dir,
+                                          config_.dosage_field);
+}
+
 void Preprocessor::run() {
     LogModule module("preprocess");
     Timer timer("preprocess stage");
 
     createOutputDirectories();
 
-    // A single processor serves the whole stage: the deduplication spool holds a
-    // full copy of the genotype matrix, so it is kept next to the output rather
-    // than on whatever /tmp happens to be.
-    VCFProcessor processor(config_.vcf_file, config_.maf_filter,
-                           config_.max_missing_rate, config_.output_dir,
-                           config_.dosage_field);
-    if (!processor.initialize(config_.sample_list)) {
-        throw std::runtime_error("Failed to initialize VCF processor");
+    std::unique_ptr<GenotypeSource> source = makeSource();
+    if (!source->initialize(config_.sample_list)) {
+        throw std::runtime_error("Failed to open the genotype input");
     }
-    n_samples_ = processor.getTargetSamples().size();
-    saveHeaderMetadata(processor.getContigNames());
+    if (!config_.extract_file.empty()) {
+        auto ids = readIdList(config_.extract_file);
+        logInfo("Extract list: " + formatCount(ids.size()) + " variant IDs");
+        source->setExtractIds(std::move(ids));
+    }
+
+    n_samples_ = static_cast<int>(source->getTargetSamples().size());
+    saveHeaderMetadata(source->getContigNames());
 
     generateAndSaveTraits();
 
-    processAndChunkVCF(processor);
+    processAndChunkVCF(*source);
 
     logInfo("Done in " + formatDuration(timer.elapsed()) + " -> " + config_.output_dir);
 }

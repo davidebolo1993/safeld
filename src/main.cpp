@@ -1,5 +1,7 @@
 #include <iostream>
+#include <fstream>
 #include <string>
+#include "genotype_source.h"
 #include "preprocessor.h"
 #include "chunked_simulator.h"
 #include "vcf_merger.h"
@@ -9,9 +11,12 @@ void printUsage(const char* program_name) {
     std::cout << "SAFELD - Three-stage workflow\n\n";
     std::cout << "Stage 1 - Preprocessing:\n";
     std::cout << "  " << program_name << " preprocess [OPTIONS]\n";
-    std::cout << "    -vcf FILE            Input VCF file (required)\n";
+    std::cout << "    -vcf FILE            Input VCF file\n";
+    std::cout << "    -pfile PREFIX        Input plink2 .pgen/.pvar/.psam (requires SAFELD_PGEN)\n";
+    std::cout << "    -bfile PREFIX        Input plink1 .bed/.bim/.fam  (requires SAFELD_PGEN)\n";
     std::cout << "    -out DIR             Output directory for preprocessed data\n";
-    std::cout << "    -samples LIST        Comma-separated sample IDs\n";
+    std::cout << "    -samples LIST        Comma-separated sample IDs, or a file with one per line\n";
+    std::cout << "    -extract FILE        Keep only these variant IDs, one per line\n";
     std::cout << "    -maf FLOAT           MAF filter (default: 0.01)\n";
     std::cout << "    -max-missing FLOAT   Max fraction of missing calls per variant (default: 0.1)\n";
     std::cout << "    -dosage-field FIELD  auto|DS|GT: which FORMAT field to read (default: auto)\n";
@@ -77,9 +82,13 @@ int main(int argc, char* argv[]) {
                     std::cout << "SAFELD Preprocessing\n\n";
                     std::cout << "Usage: " << argv[0] << " preprocess [OPTIONS]\n\n";
                     std::cout << "Options:\n";
-                    std::cout << "  -vcf FILE            Input VCF file (required)\n";
+                    std::cout << "  -vcf FILE            Input VCF file\n";
+                    std::cout << "  -pfile PREFIX        Input plink2 .pgen/.pvar/.psam\n";
+                    std::cout << "  -bfile PREFIX        Input plink1 .bed/.bim/.fam\n";
+                    std::cout << "                       (exactly one of -vcf/-pfile/-bfile)\n";
                     std::cout << "  -out DIR             Output directory for preprocessed data (required)\n";
-                    std::cout << "  -samples LIST        Comma-separated sample IDs\n";
+                    std::cout << "  -samples LIST        Comma-separated sample IDs, or a file with one per line\n";
+                    std::cout << "  -extract FILE        Keep only these variant IDs, one per line\n";
                     std::cout << "  -maf FLOAT           MAF filter (default: 0.01)\n";
                     std::cout << "  -max-missing FLOAT   Max fraction of missing calls per variant (default: 0.1)\n";
                     std::cout << "  -dosage-field FIELD  auto|DS|GT: which FORMAT field to read (default: auto)\n";
@@ -95,10 +104,38 @@ int main(int argc, char* argv[]) {
 
                 if (arg == "-vcf" && i + 1 < argc) {
                     config.vcf_file = argv[++i];
+                } else if (arg == "-pfile" && i + 1 < argc) {
+                    config.genotype_file = std::string(argv[++i]) + ".pgen";
+                    config.plink1_metadata = false;
+                } else if (arg == "-bfile" && i + 1 < argc) {
+                    config.genotype_file = std::string(argv[++i]) + ".bed";
+                    config.plink1_metadata = true;
+                } else if (arg == "-pgen" && i + 1 < argc) {
+                    config.genotype_file = argv[++i];
+                } else if (arg == "-pvar" && i + 1 < argc) {
+                    config.variants_file = argv[++i];
+                } else if (arg == "-psam" && i + 1 < argc) {
+                    config.samples_file = argv[++i];
+                } else if (arg == "-extract" && i + 1 < argc) {
+                    config.extract_file = argv[++i];
                 } else if (arg == "-out" && i + 1 < argc) {
                     config.output_dir = argv[++i];
                 } else if (arg == "-samples" && i + 1 < argc) {
-                    config.sample_list = argv[++i];
+                    // Accept either a comma-separated list or a file of IDs, so
+                    // a subset does not have to fit on a command line.
+                    std::string value = argv[++i];
+                    std::ifstream probe(value);
+                    if (probe.good() && value.find(',') == std::string::npos) {
+                        auto ids = readIdList(value);
+                        std::string joined;
+                        for (size_t k = 0; k < ids.size(); ++k) {
+                            if (k) joined += ",";
+                            joined += ids[k];
+                        }
+                        config.sample_list = joined;
+                    } else {
+                        config.sample_list = value;
+                    }
                 } else if (arg == "-maf" && i + 1 < argc) {
                     config.maf_filter = std::stod(argv[++i]);
                 } else if (arg == "-max-missing" && i + 1 < argc) {
@@ -118,9 +155,15 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            if (config.vcf_file.empty() || config.output_dir.empty()) {
-                logError("VCF file and output directory are required");
+            const int n_inputs = (!config.vcf_file.empty() ? 1 : 0) +
+                                 (!config.genotype_file.empty() ? 1 : 0);
+            if (n_inputs == 0 || config.output_dir.empty()) {
+                logError("An input (-vcf, -pfile or -bfile) and an output directory are required");
                 std::cout << "\nUse: " << argv[0] << " preprocess --help for usage information\n";
+                return 1;
+            }
+            if (n_inputs > 1) {
+                logError("Give exactly one of -vcf, -pfile or -bfile");
                 return 1;
             }
             if (config.maf_filter < 0.0 || config.maf_filter >= 0.5) {

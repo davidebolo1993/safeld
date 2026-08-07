@@ -7,6 +7,9 @@
 #include <htslib/vcf.h>
 #include <htslib/hts.h>
 #include <unordered_map>
+#include <unordered_set>
+
+#include "genotype_source.h"
 
 struct Variant {
     std::string id;
@@ -56,7 +59,7 @@ struct DosageStats {
     int observed_count = 0;
 };
 
-class VCFProcessor {
+class VCFProcessor : public GenotypeSource {
 private:
     std::string vcf_file_;
     double maf_filter_;
@@ -83,6 +86,11 @@ private:
     int missing_filtered_variants_;
     int gt_fallback_variants_;
     long long gt_filled_calls_;
+    SourceCounts counts_;
+    long long not_extracted_ = 0;
+    long long maf_filtered_ = 0;
+    std::unordered_set<std::string> extract_ids_;
+    std::unordered_set<std::string> extract_seen_;
 
     bool openVCF();
     void closeVCF();
@@ -103,11 +111,12 @@ public:
                  DosageField dosage_field = DosageField::Auto);
     ~VCFProcessor();
 
-    bool initialize(const std::string& sample_list = "");
-
-    using VariantCallback = std::function<void(std::unique_ptr<Variant>)>;
-    void streamVariants(VariantCallback callback);
-    std::vector<std::string> getContigNames() const;
+    bool initialize(const std::string& sample_list = "") override;
+    void streamVariants(VariantCallback callback) override;
+    std::vector<std::string> getContigNames() const override;
+    const SourceCounts& counts() const override { return counts_; }
+    void setExtractIds(std::vector<std::string> ids) override;
+    std::string describe() const override { return "VCF"; }
 
     // Reads up to max_records from a second handle on the same file and
     // summarises it. Called by initialize(); exposed for callers that want the
@@ -115,7 +124,7 @@ public:
     InputScan scanInput(int max_records = 5000);
     const InputScan& inputScan() const { return scan_; }
 
-    const std::vector<std::string>& getTargetSamples() const { return target_samples_; }
+    const std::vector<std::string>& getTargetSamples() const override { return target_samples_; }
     int getTotalVariants() const { return total_variants_; }
     int getFilteredVariants() const { return filtered_variants_; }
     int getDuplicateVariants() const { return duplicate_variants_; }

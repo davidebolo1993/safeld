@@ -80,7 +80,10 @@ Global option:
 
 #### Stage 1: Preprocessing
 
-Generates trait matrix and partitions variants into chunks.
+Generates trait matrix and partitions variants into chunks. Accepts a VCF, a
+plink2 `.pgen/.pvar/.psam` triple, or a plink1 `.bed/.bim/.fam` triple — exactly
+one of `-vcf`, `-pfile`, `-bfile`. The plink formats are read natively, with no
+VCF conversion, when built with `-DSAFELD_PGEN=ON` (see below).
 Input VCF must be coordinate-sorted and biallelic (split multiallelic records
 first with `bcftools norm -m -any`; non-biallelic records are skipped and counted).
 
@@ -98,9 +101,12 @@ first with `bcftools norm -m -any`; non-biallelic records are skipped and counte
 ./safeld preprocess [OPTIONS]
 
 Options:
-  -vcf FILE            Input VCF file (required)
+  -vcf FILE            Input VCF file
+  -pfile PREFIX        Input plink2 .pgen/.pvar/.psam
+  -bfile PREFIX        Input plink1 .bed/.bim/.fam
   -out DIR             Output directory for preprocessed data
-  -samples LIST        Comma-separated sample IDs
+  -samples LIST        Comma-separated sample IDs, or a file with one per line
+  -extract FILE        Keep only these variant IDs, one per line
   -maf FLOAT           MAF filter (default: 0.01)
   -max-missing FLOAT   Max fraction of missing calls per variant (default: 0.1)
   -dosage-field FIELD  auto|DS|GT: which FORMAT field to read (default: auto)
@@ -260,6 +266,52 @@ Missingness is resolved during preprocessing, before standardization:
 - Concatenate all chunk VCF files maintaining chromosome order
 - Stream processing for memory efficiency
 
+
+### Native .pgen / .bed support
+
+Reading plink formats directly avoids the VCF round-trip that caused real
+trouble: exporting a hard-call pgen with `--export vcf vcf-dosage=DS` writes the
+`DS` subfield for only the entries that happen to carry a dosage track, and the
+resulting VCF cannot be read correctly without knowing that. A `.pgen` records
+dosage presence explicitly per sample, so the ambiguity does not arise.
+
+```bash
+git clone --depth 1 https://github.com/chrchang/plink-ng
+cmake -DSAFELD_PGEN=ON -DPLINK_NG_DIR=/path/to/plink-ng ..
+```
+
+A full clone is needed: plink-ng's vendored `simde/` is required to compile.
+pgenlib is LGPL-3.0 and is built as a shared library; safeld itself stays MIT.
+Without this option `-pfile`/`-bfile` report a clear error and `-vcf` is
+unaffected.
+
+### Subsetting
+
+`-extract FILE` keeps only the listed variant IDs, matching the ID column of the
+VCF or `.pvar`/`.bim` — the same semantics as plink's `--extract`:
+
+```txt
+1:113989901:A:G
+1:113990655:A:G
+```
+
+`-samples` takes either a comma-separated list or a file with one ID per line.
+Both work for every input format. If entries in the extract list match nothing,
+preprocessing says so rather than quietly keeping fewer variants than expected.
+
+## Tests
+
+```bash
+tests/run_tests.sh build/safeld
+```
+
+The central check writes the same genotypes as both a VCF and a plink1 `.bed`,
+then requires the two readers to produce byte-identical standardized matrices —
+so a reader bug shows up as disagreement rather than as plausible output. The
+rest cover the input pathologies that caused real failures: ID-less records,
+duplicate loci and IDs, multiallelic sites, all-missing and monomorphic
+variants, and sparse `DS`. Tests needing `.bed` skip themselves when built
+without `SAFELD_PGEN`.
 
 ### Dependencies
 

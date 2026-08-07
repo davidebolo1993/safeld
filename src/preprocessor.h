@@ -4,6 +4,7 @@
 #include <vector>
 #include <memory>
 
+#include "genotype_source.h"
 #include "vcf_processor.h"
 
 
@@ -19,6 +20,13 @@ struct PreprocessConfig {
     int chunk_size = 10000;  // variants per chunk
     int traits_per_tile = 0;  // 0 = auto (aim for ~1GB per tile)
     std::string sample_list;
+
+    // Input selection. Exactly one of vcf_file / genotype_file is used.
+    std::string genotype_file;                 // .pgen or .bed
+    std::string variants_file;                 // .pvar or .bim (optional override)
+    std::string samples_file;                  // .psam or .fam (optional override)
+    bool plink1_metadata = false;              // bed/bim/fam rather than pgen/pvar/psam
+    std::string extract_file;                  // variant ID list, one per line
 };
 
 struct ChunkMetadata {
@@ -50,7 +58,8 @@ private:
     
     void createOutputDirectories();
     void generateAndSaveTraits();
-    void processAndChunkVCF(VCFProcessor& processor);
+    void processAndChunkVCF(GenotypeSource& source);
+    std::unique_ptr<GenotypeSource> makeSource();
     void saveHeaderMetadata(const std::vector<std::string>& contig_names);
     
     void saveTraitsTiled();

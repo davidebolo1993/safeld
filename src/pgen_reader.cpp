@@ -7,6 +7,9 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <unordered_map>
+#include <unordered_set>
+#include <iomanip>
 
 #include "pgenlib_read.h"
 #include "pgenlib_misc.h"
@@ -66,12 +69,31 @@ struct PgenSource::Impl {
     }
 };
 
-PgenSource::PgenSource() : impl_(new Impl()) {}
+PgenSource::PgenSource(const std::string& genotype_path, Metadata metadata,
+                       double maf_filter, double max_missing_rate, DosageField dosage_field)
+    : impl_(new Impl()), genotype_path_(genotype_path), metadata_(metadata),
+      maf_filter_(maf_filter), max_missing_rate_(max_missing_rate),
+      dosage_field_(dosage_field) {}
 
 PgenSource::~PgenSource() { delete impl_; }
 
-void PgenSource::setSampleSubset(const std::vector<int>& indices) {
-    sample_indices_ = indices;
+void PgenSource::setExtractIds(std::vector<std::string> ids) {
+    extract_ids_ = std::move(ids);
+}
+
+std::vector<std::string> PgenSource::getContigNames() const {
+    // Contig order as first seen in the variant table.
+    std::vector<std::string> contigs;
+    std::string last;
+    for (const auto& v : variants_) {
+        if (v.chrom != last) {
+            if (std::find(contigs.begin(), contigs.end(), v.chrom) == contigs.end()) {
+                contigs.push_back(v.chrom);
+            }
+            last = v.chrom;
+        }
+    }
+    return contigs;
 }
 
 bool PgenSource::loadPsam(const std::string& path, std::string& error) {
@@ -114,6 +136,46 @@ bool PgenSource::loadPsam(const std::string& path, std::string& error) {
     return true;
 }
 
+// .fam: FID IID PID MID SEX PHENO, no header. IID is column 2.
+bool PgenSource::loadFam(const std::string& path, std::string& error) {
+    std::ifstream in(path);
+    if (!in) { error = "cannot open " + path; return false; }
+    sample_ids_.clear();
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        std::istringstream ls(line);
+        std::string fid, iid;
+        if (!(ls >> fid >> iid)) { error = "malformed .fam record: " + line; return false; }
+        sample_ids_.push_back(iid);
+    }
+    if (sample_ids_.empty()) { error = "no samples in " + path; return false; }
+    return true;
+}
+
+// .bim: CHROM ID CM POS ALT REF, no header. Note the allele order: plink 1
+// writes A1 (usually minor/ALT) before A2 (usually REF), the opposite of a VCF.
+bool PgenSource::loadBim(const std::string& path, std::string& error) {
+    std::ifstream in(path);
+    if (!in) { error = "cannot open " + path; return false; }
+    variants_.clear();
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        std::istringstream ls(line);
+        PgenVariantRecord rec;
+        std::string cm;
+        if (!(ls >> rec.chrom >> rec.id >> cm >> rec.pos >> rec.alt >> rec.ref)) {
+            error = "malformed .bim record: " + line;
+            return false;
+        }
+        rec.biallelic = true;  // .bed is biallelic by construction
+        variants_.push_back(std::move(rec));
+    }
+    if (variants_.empty()) { error = "no variants in " + path; return false; }
+    return true;
+}
+
 bool PgenSource::loadPvar(const std::string& path, std::string& error) {
     std::ifstream in(path);
     if (!in) {
@@ -140,14 +202,24 @@ bool PgenSource::loadPvar(const std::string& path, std::string& error) {
     return true;
 }
 
-bool PgenSource::open(const std::string& pgen_path, std::string& error,
-                      const std::string& pvar_path, const std::string& psam_path) {
-    const std::string stem = stripSuffix(pgen_path, ".pgen");
-    const std::string pvar = pvar_path.empty() ? stem + ".pvar" : pvar_path;
-    const std::string psam = psam_path.empty() ? stem + ".psam" : psam_path;
+bool PgenSource::openFile(std::string& error) {
+    const std::string& pgen_path = genotype_path_;
+    std::string stem = stripSuffix(pgen_path, ".pgen");
+    stem = stripSuffix(stem, ".bed");
 
-    if (!loadPsam(psam, error)) return false;
-    if (!loadPvar(pvar, error)) return false;
+    const bool bim_style = (metadata_ == Metadata::Bim);
+    const std::string vpath = !variants_path_.empty() ? variants_path_
+                                                      : stem + (bim_style ? ".bim" : ".pvar");
+    const std::string spath = !samples_path_.empty() ? samples_path_
+                                                     : stem + (bim_style ? ".fam" : ".psam");
+
+    if (bim_style) {
+        if (!loadFam(spath, error)) return false;
+        if (!loadBim(vpath, error)) return false;
+    } else {
+        if (!loadPsam(spath, error)) return false;
+        if (!loadPvar(vpath, error)) return false;
+    }
 
     n_samples_ = static_cast<int>(sample_ids_.size());
     const uint32_t raw_sample_ct = static_cast<uint32_t>(n_samples_);
@@ -282,6 +354,186 @@ bool PgenSource::readVariant(long long vidx, bool prefer_dosage,
 
     if (filled_from_hardcall) *filled_from_hardcall = filled;
     return true;
+}
+
+bool PgenSource::initialize(const std::string& sample_list) {
+    std::string error;
+    if (!openFile(error)) {
+        logError("Failed to open " + genotype_path_ + ": " + error);
+        return false;
+    }
+
+    // Resolve the sample subset against the .psam/.fam IDs.
+    sample_indices_.clear();
+    target_samples_.clear();
+    if (sample_list.empty()) {
+        sample_indices_.resize(n_samples_);
+        target_samples_ = sample_ids_;
+        for (int i = 0; i < n_samples_; ++i) sample_indices_[i] = i;
+    } else {
+        std::unordered_map<std::string, int> index;
+        for (int i = 0; i < n_samples_; ++i) index[sample_ids_[i]] = i;
+        for (auto& raw : split(sample_list, ',')) {
+            std::string id = raw;
+            id.erase(0, id.find_first_not_of(" \t"));
+            id.erase(id.find_last_not_of(" \t") + 1);
+            auto it = index.find(id);
+            if (it != index.end()) {
+                target_samples_.push_back(id);
+                sample_indices_.push_back(it->second);
+            }
+        }
+        if (target_samples_.empty()) {
+            logError("None of the requested samples are present in " + genotype_path_);
+            return false;
+        }
+        logInfo("Sample subset: " + formatCount(target_samples_.size()) + "/" +
+                formatCount(n_samples_));
+    }
+
+    long long multiallelic = 0;
+    for (const auto& v : variants_) if (!v.biallelic) multiallelic++;
+
+    logInfo("Input: " + formatCount(target_samples_.size()) + " samples, " +
+            formatCount(variants_.size()) + " variants (" + describe() + ")");
+    if (multiallelic > 0) {
+        logInfo("  " + formatCount(multiallelic) + " non-biallelic (will be skipped)");
+    }
+
+    chooseField();
+    return true;
+}
+
+// A .bed never stores dosages, and a .pgen records presence explicitly, so the
+// choice here needs no sampling heuristic: ask the format.
+void PgenSource::chooseField() {
+    effective_field_ = dosage_field_;
+
+    PgenScan s = scan(std::min<long long>(5000, static_cast<long long>(variants_.size())));
+    if (s.ok) {
+        std::ostringstream os;
+        os << std::fixed << std::setprecision(1);
+        os << "  hard calls for " << (s.hardcall_rate * 100.0) << "% of calls";
+        if (s.dosage_presence > 0.0) {
+            os << ", dosages for " << (s.dosage_presence * 100.0) << "%";
+        }
+        logInfo(os.str());
+    }
+
+    if (dosage_field_ == DosageField::Auto) {
+        // Dosages where the format has them, hard calls elsewhere. There is no
+        // ambiguity to resolve: presence is recorded per sample.
+        effective_field_ = (s.dosage_presence > 0.0) ? DosageField::DS : DosageField::GT;
+    }
+    if (effective_field_ == DosageField::DS && s.dosage_presence <= 0.0) {
+        if (dosage_field_ == DosageField::DS) {
+            logWarning("-dosage-field DS requested but this input stores no dosages; "
+                       "reading hard calls.");
+        }
+        effective_field_ = DosageField::GT;
+    }
+
+    logInfo(std::string("Dosage source: ") +
+            (effective_field_ == DosageField::GT ? "hard calls" : "dosages, hard calls where absent") +
+            (dosage_field_ == DosageField::Auto ? " (auto)" : " (forced)"));
+}
+
+void PgenSource::streamVariants(VariantCallback callback) {
+    counts_ = SourceCounts{};
+    counts_.total = static_cast<long long>(variants_.size());
+
+    std::unordered_set<std::string> extract;
+    for (const auto& id : extract_ids_) extract.insert(id);
+    std::unordered_set<std::string> seen;
+
+    // Random access plus the full variant table means duplicates can be found up
+    // front, so no spool file is needed here: every copy is simply skipped.
+    std::unordered_map<std::string, int> locus_count;
+    std::unordered_map<std::string, int> id_count;
+    for (const auto& v : variants_) {
+        if (!v.biallelic) continue;
+        locus_count[v.chrom + ":" + std::to_string(v.pos) + ":" + v.ref + ":" + v.alt]++;
+        if (v.id != "." && !v.id.empty()) id_count[v.id]++;
+    }
+
+    const bool prefer_dosage = (effective_field_ != DosageField::GT);
+    std::vector<double> dosages;
+    DosageStats stats;
+
+    ProgressBar bar("Reading variants", static_cast<long long>(variants_.size()));
+    for (long long v = 0; v < static_cast<long long>(variants_.size()); ++v) {
+        bar.increment();
+        const PgenVariantRecord& rec = variants_[v];
+
+        if (!rec.biallelic) { counts_.multiallelic++; continue; }
+        if (!extract.empty()) {
+            if (!extract.contains(rec.id)) { counts_.not_extracted++; continue; }
+            seen.insert(rec.id);
+        }
+
+        const std::string locus = rec.chrom + ":" + std::to_string(rec.pos) + ":" +
+                                  rec.ref + ":" + rec.alt;
+        const bool dup = locus_count[locus] > 1 ||
+                         (rec.id != "." && !rec.id.empty() && id_count[rec.id] > 1);
+        if (dup) { counts_.duplicates++; continue; }
+
+        long long filled = 0;
+        if (!readVariant(v, prefer_dosage, dosages, stats, &filled)) continue;
+
+        const double n = static_cast<double>(dosages.size());
+        if (n <= 0) continue;
+        if (1.0 - static_cast<double>(stats.observed_count) / n > max_missing_rate_) {
+            counts_.missing_filtered++;
+            continue;
+        }
+        if (stats.observed_count == 0) { counts_.missing_filtered++; continue; }
+
+        const double af = stats.observed_sum / (2.0 * stats.observed_count);
+        if (af < maf_filter_ || af > 1.0 - maf_filter_) { counts_.maf_filtered++; continue; }
+
+        // Mean-impute whatever is left, matching the VCF path.
+        const double mean = stats.observed_sum / stats.observed_count;
+        for (double& d : dosages) if (d < 0.0) d = mean;
+
+        if (filled > 0) {
+            counts_.hardcall_filled += filled;
+            counts_.hardcall_filled_variants++;
+        }
+
+        auto out = std::make_unique<Variant>();
+        out->id = rec.id;
+        out->chrom = rec.chrom;
+        out->pos = rec.pos;
+        out->ref = rec.ref;
+        out->alt = rec.alt;
+        out->af = af;
+        out->dosages = dosages;
+        callback(std::move(out));
+        counts_.emitted++;
+    }
+    bar.finish();
+
+    logInfo("Read " + formatCount(counts_.total) + " variants, kept " +
+            formatCount(counts_.emitted));
+    if (counts_.not_extracted > 0)
+        logInfo("  excluded " + formatCount(counts_.not_extracted) + " not in the extract list");
+    if (counts_.multiallelic > 0)
+        logInfo("  excluded " + formatCount(counts_.multiallelic) + " non-biallelic");
+    if (counts_.maf_filtered > 0)
+        logInfo("  excluded " + formatCount(counts_.maf_filtered) + " below the MAF threshold");
+    if (counts_.missing_filtered > 0)
+        logInfo("  excluded " + formatCount(counts_.missing_filtered) + " over the missingness limit");
+    if (counts_.duplicates > 0)
+        logInfo("  excluded " + formatCount(counts_.duplicates) + " duplicated by locus or ID (every copy)");
+    counts_.extract_unmatched = static_cast<long long>(extract.size()) -
+                                static_cast<long long>(seen.size());
+    if (!extract.empty() && counts_.extract_unmatched > 0) {
+        logWarning(formatCount(counts_.extract_unmatched) + " of " + formatCount(extract.size()) +
+                   " extract IDs matched no variant. The list must use the same IDs as the "
+                   "ID column of the .pvar/.bim.");
+    }
+    if (counts_.hardcall_filled > 0)
+        logInfo("  " + formatCount(counts_.hardcall_filled) + " call(s) taken from hard calls where no dosage was stored");
 }
 
 PgenScan PgenSource::scan(long long max_variants) {

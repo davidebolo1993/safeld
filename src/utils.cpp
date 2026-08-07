@@ -1,4 +1,7 @@
 #include "utils.h"
+#include "genotype_source.h"
+#include <fstream>
+#include <stdexcept>
 #include <iostream>
 #include <sstream>
 #include <iomanip>
@@ -315,6 +318,29 @@ void ProgressCounter::finish(const std::string& suffix) {
 }
 
 // ---------------------------------------------------------------------------
+
+std::vector<std::string> readIdList(const std::string& path) {
+    std::ifstream in(path);
+    if (!in) {
+        throw std::runtime_error("Cannot open ID list: " + path);
+    }
+    std::vector<std::string> ids;
+    std::string line;
+    while (std::getline(in, line)) {
+        // Tolerate trailing CR from files written on Windows.
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) {
+            line.pop_back();
+        }
+        if (line.empty() || line[0] == '#') continue;
+        // plink accepts extra columns; the ID is the first field.
+        const size_t tab = line.find_first_of(" \t");
+        ids.push_back(tab == std::string::npos ? line : line.substr(0, tab));
+    }
+    if (ids.empty()) {
+        throw std::runtime_error("No IDs found in " + path);
+    }
+    return ids;
+}
 
 std::vector<std::string> split(const std::string& str, char delimiter) {
     std::vector<std::string> tokens;

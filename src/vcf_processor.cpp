@@ -667,6 +667,14 @@ void VCFProcessor::reportScanAndChooseField() {
     logInfo(std::string("Dosage source: ") + chosen + how);
 }
 
+void VCFProcessor::setExtractIds(std::vector<std::string> ids) {
+    extract_ids_.clear();
+    extract_ids_.reserve(ids.size());
+    for (auto& id : ids) {
+        extract_ids_.insert(std::move(id));
+    }
+}
+
 // stream variants with one-pass duplicate tracking.
 void VCFProcessor::streamVariants(VariantCallback callback) {
     Timer timer("VCF streaming");
@@ -681,6 +689,9 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
     missing_filtered_variants_ = 0;
     gt_fallback_variants_ = 0;
     gt_filled_calls_ = 0;
+    not_extracted_ = 0;
+    maf_filtered_ = 0;
+    extract_seen_.clear();
 
     {
         int rank = 0;
@@ -774,6 +785,14 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
         std::string ref = rec_->d.allele[0];
         std::string alt = rec_->d.allele[1];
 
+        if (!extract_ids_.empty()) {
+            if (!extract_ids_.contains(id)) {
+                not_extracted_++;
+                continue;
+            }
+            extract_seen_.insert(id);
+        }
+
         double af = -1.0;
         std::vector<double> dosages;
         DosageStats stats;
@@ -783,6 +802,7 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
         // before touching per-sample data.
         if (use_info_af_ && tryExtractAfFromInfo(rec_, af)) {
             if (failsMafFilter(af)) {
+                maf_filtered_++;
                 continue;
             }
         } else {
@@ -790,8 +810,16 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
                 continue;
             }
             have_dosages = true;
+            // With nothing observed there is no frequency to test. Report that
+            // as missingness rather than letting it fall through the MAF filter,
+            // where it would be counted as a frequency exclusion it never had.
+            if (stats.observed_count == 0) {
+                missing_filtered_variants_++;
+                continue;
+            }
             af = alleleFrequencyFromObserved(stats);
             if (failsMafFilter(af)) {
+                maf_filtered_++;
                 continue;
             }
         }
@@ -867,8 +895,9 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
     spool.clear();
     spool.seekg(0, std::ios::beg);
 
-    ProgressBar emit_bar("Emitting variants", total_variants_ - duplicate_variants_ -
-                         multiallelic_variants_ - missing_filtered_variants_);
+    ProgressBar emit_bar("Emitting variants",
+                         total_variants_ - duplicate_variants_ - multiallelic_variants_ -
+                         missing_filtered_variants_ - not_extracted_);
     uint8_t keep = 0;
     Variant spooled_variant;
     while (readSpoolRecord(spool, keep, spooled_variant)) {
@@ -895,8 +924,16 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
     // of zeroes buries the one line that matters.
     logInfo("Scanned " + formatCount(total_variants_) + " variants, kept " +
             formatCount(filtered_variants_));
+    if (not_extracted_ > 0) {
+        logInfo("  excluded " + formatCount(not_extracted_) + " not in the extract list");
+    }
     if (multiallelic_variants_ > 0) {
         logInfo("  excluded " + formatCount(multiallelic_variants_) + " non-biallelic");
+    }
+    if (maf_filtered_ > 0) {
+        std::ostringstream mf;
+        mf << std::fixed << std::setprecision(4) << maf_filter_;
+        logInfo("  excluded " + formatCount(maf_filtered_) + " below the MAF threshold (" + mf.str() + ")");
     }
     if (missing_filtered_variants_ > 0) {
         std::ostringstream mm;
@@ -915,6 +952,26 @@ void VCFProcessor::streamVariants(VariantCallback callback) {
                    "rather than imputing. Use -dosage-field GT for a matrix built "
                    "from one field throughout.");
     }
+
+    counts_.total = total_variants_;
+    counts_.emitted = filtered_variants_;
+    counts_.multiallelic = multiallelic_variants_;
+    counts_.missing_filtered = missing_filtered_variants_;
+    counts_.duplicates = duplicate_variants_;
+    counts_.not_extracted = not_extracted_;
+    counts_.maf_filtered = maf_filtered_;
+    counts_.extract_unmatched = static_cast<long long>(extract_ids_.size()) -
+                                static_cast<long long>(extract_seen_.size());
+
+    // Silence here would be the worst outcome: an ID list that matches nothing
+    // looks exactly like a successful run that happened to keep no variants.
+    if (!extract_ids_.empty() && counts_.extract_unmatched > 0) {
+        logWarning(formatCount(counts_.extract_unmatched) + " of " +
+                   formatCount(extract_ids_.size()) + " extract IDs matched no variant. "
+                   "The list must use the same IDs as the input's ID column.");
+    }
+    counts_.hardcall_filled = gt_filled_calls_;
+    counts_.hardcall_filled_variants = gt_fallback_variants_;
 
     if (filtered_variants_ == 0) {
         logWarning("No variants passed filtering; downstream stages will have nothing to process");
