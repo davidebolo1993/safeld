@@ -43,7 +43,11 @@ def write_vcf(path, samples, variants, with_ds=None):
                     continue
                 gt = "0/0" if g == 0 else "0/1" if g == 1 else "1/1"
                 if with_ds is not None and with_ds(vi, si):
-                    cells.append(f"{gt}:{float(g):.3f}")
+                    # Deliberately off the integer grid: an exact 0/1/2 would
+                    # survive pgenlib's uint16 dosage encoding unchanged and so
+                    # would not exercise quantization at all.
+                    d = min(2.0, max(0.0, g + (0.137 if si % 2 else -0.081)))
+                    cells.append(f"{gt}:{d:.4f}")
                 elif with_ds is not None:
                     cells.append(gt)          # DS subfield simply omitted
                 else:

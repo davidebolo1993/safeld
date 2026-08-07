@@ -212,6 +212,41 @@ PYEOF
         "variant indices are mistranslated"
   fi
 
+  # The only coverage of the pgen dosage path: .bed carries hard calls alone,
+  # so without this nothing exercises PgrGetD at all. Compared within a
+  # tolerance rather than byte for byte, because pgenlib stores dosages on a
+  # 1/16384 grid while a VCF carries a rounded decimal rendering of that value,
+  # so the two disagree by up to one grid step by construction.
+  if command -v plink2 >/dev/null 2>&1; then
+    D="$WORK/dsround"; mkdir -p "$D"
+    if plink2 --vcf "$DATA/sparse_ds.vcf" dosage=DS --make-pgen --out "$D/pl" >/dev/null 2>&1 \
+       && plink2 --pfile "$D/pl" --export vcf vcf-dosage=DS-force --out "$D/force" >/dev/null 2>&1; then
+      run preprocess -vcf "$D/force.vcf" -out "$D/p_vcf"  -ntraits 5 >/dev/null 2>&1
+      run preprocess -pfile "$D/pl"      -out "$D/p_pgen" -ntraits 5 >/dev/null 2>&1
+      if python3 - "$D/p_vcf" "$D/p_pgen" <<'PYEOF'
+import struct, sys
+def vals(d):
+    raw = open(d + "/chunks/chunk_0.bin", "rb").read()
+    return struct.unpack("<%dd" % (len(raw) // 8), raw)
+a, b = vals(sys.argv[1]), vals(sys.argv[2])
+if len(a) != len(b) or not a:
+    sys.exit(1)
+worst = max(abs(x - y) for x, y in zip(a, b))
+print("      max |vcf - pgen| = %.2e (one dosage grid step is 6.1e-05)" % worst)
+sys.exit(0 if worst < 5e-4 else 1)
+PYEOF
+      then
+        ok "pgen dosages match a DS-force VCF within the quantization grid"
+      else
+        bad "pgen dosages match a DS-force VCF within the quantization grid"
+      fi
+    else
+      skip "pgen dosage round trip (plink2 rejected the fixture)"
+    fi
+  else
+    skip "pgen dosage round trip (plink2 not in PATH)"
+  fi
+
   # Passing the full path used to append a second extension.
   run preprocess -pfile "$DATA/matched.bed" -out "$WORK/m" -ntraits 5 >/dev/null 2>&1 || true
   run preprocess -bfile "$DATA/matched.bed" -out "$WORK/n1" -ntraits 5 >/dev/null 2>&1

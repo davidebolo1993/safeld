@@ -308,6 +308,31 @@ VCF or `.pvar`/`.bim` — the same semantics as plink's `--extract`:
 Both work for every input format. If entries in the extract list match nothing,
 preprocessing says so rather than quietly keeping fewer variants than expected.
 
+### Comparing a pgen run against a VCF run
+
+Reading the same data as `.pgen` and as a VCF exported from it does not give
+byte-identical output, and should not be expected to. pgenlib stores a dosage as
+a 16-bit integer on a 1/16384 grid, while a VCF carries a rounded decimal
+rendering of that stored value, so the two differ by up to one grid step
+(~6e-5). `cmp` therefore reports a difference at the very first double. The pgen
+figure is the more accurate of the two, being the value actually stored.
+
+The effect is numerically irrelevant: on a 25-variant test the per-variant
+correlation between the two matrices was 1.000000000 and pairwise r² differed by
+at most 2.5e-6. Compare with a tolerance rather than byte for byte:
+
+```bash
+python3 - a/chunks/chunk_0.bin b/chunks/chunk_0.bin <<'EOF'
+import struct, sys
+v = lambda p: struct.unpack("<%dd" % (len(open(p,'rb').read())//8), open(p,'rb').read())
+a, b = v(sys.argv[1]), v(sys.argv[2])
+print("max |a-b| =", max(abs(x-y) for x, y in zip(a, b)))
+EOF
+```
+
+Hard-call inputs have no such grid, so a `.bed` and a VCF of the same genotypes
+*are* byte-identical, which is what the test suite checks.
+
 
 ### Dependencies
 
