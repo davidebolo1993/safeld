@@ -13,8 +13,8 @@ SAFELD processes VCF files to generate synthetic traits while preserving the lin
 ## Features
 
 - **High Performance**: Optimized C++ implementation with OpenBLAS integration and BLAS GEMM operations
-- **Memory Efficient**: Custom memory pools and optimized data structures
-- **Parallel Processing**: Multi-threaded variant processing with OpenMP
+- **Memory Efficient**: Streaming, chunked data structures that keep the working set bounded
+- **Parallel Processing**: Multi-threaded BLAS, with the thread count exposed via `-workers`
 - **Flexible Input**: Supports compressed and uncompressed VCF files
 - **HTSlib Integration**: Robust VCF parsing using industry-standard library
 - **Docker Support**: Containerized deployment for reproducibility
@@ -80,8 +80,12 @@ Global option:
 
 #### Stage 1: Preprocessing
 
-Generates trait matrix and partitions variants into chunks.
-Input VCF must be coordinate-sorted.
+Generates trait matrix and partitions variants into chunks. Accepts a VCF, a
+plink2 `.pgen/.pvar/.psam` triple, or a plink1 `.bed/.bim/.fam` triple — exactly
+one of `-vcf`, `-pfile`, `-bfile`. The plink formats are read natively, with no
+VCF conversion, when built with `-DSAFELD_PGEN=ON` (see below).
+Input VCF must be coordinate-sorted and biallelic (split multiallelic records
+first with `bcftools norm -m -any`; non-biallelic records are skipped and counted).
 
 ```bash
 ./safeld preprocess \
@@ -97,15 +101,26 @@ Input VCF must be coordinate-sorted.
 ./safeld preprocess [OPTIONS]
 
 Options:
-  -vcf FILE            Input VCF file (required)
+  -vcf FILE            Input VCF file
+  -pfile PREFIX        Input plink2 .pgen/.pvar/.psam
+  -bfile PREFIX        Input plink1 .bed/.bim/.fam
   -out DIR             Output directory for preprocessed data
-  -samples LIST        Comma-separated sample IDs
+  -samples LIST        Comma-separated sample IDs, or a file with one per line
+  -extract FILE        Keep only these variant IDs, one per line
   -maf FLOAT           MAF filter (default: 0.01)
+  -max-missing FLOAT   Max fraction of missing calls per variant (default: 0.1)
+  -dosage-field FIELD  auto|DS|GT: which FORMAT field to read (default: auto)
+                       auto measures both fields up front and picks; DS fills
+                       absent dosages from GT; GT ignores DS entirely
   -ntraits INT         Number of traits (default: 10)
   -chunk-size INT      Variants per chunk (default: 10000)
   -traits-per-tile INT Traits per tile (default: auto, ~1GB tiles)
   -h, --help           Show this help message
 ```
+
+> **Disk space:** preprocessing writes a temporary deduplication spool into the
+> output directory holding one copy of the genotype matrix
+> (`n_variants x n_samples x 8` bytes). It is removed when the stage finishes.
 
 **Output structure:**
 ```
@@ -188,15 +203,59 @@ Options:
   -h, --help         Show this help message
 ```
 
+
 ## Algorithm
 
 SAFELD separates preprocessing from simulation for scalability:
 
 **Preprocessing Stage:**
-1. Parse VCF once and apply MAF filtering
-2. Generate trait matrix W (T × S) with standard normal random values
-3. Standardize genotype dosages and partition into chunks (B variants each)
-4. Serialize traits (tiled if large) and genotype chunks to disk
+1. Parse VCF once, skip non-biallelic records, and apply MAF and missingness filtering
+2. Deduplicate on locus (`CHROM:POS:REF:ALT`) and, where present, on variant ID
+3. Generate trait matrix W (T × S) with standard normal random values
+4. Standardize genotype dosages and partition into chunks (B variants each)
+5. Serialize traits (tiled if large) and genotype chunks to disk
+
+**Missing genotypes:**
+
+Missingness is resolved during preprocessing, before standardization:
+
+- A `DS` value that is absent, negative or `NaN` counts as missing. Without `DS`,
+  dosages are derived from `GT` on the diploid 0–2 scale, normalized by each
+  sample's own ploidy so a hemizygous ALT call (chrX/chrY in a male,
+  mitochondria) scores 2.0 rather than being confused with a heterozygote.
+- **Allele frequencies are computed from the genotypes**, not read from
+  `INFO/AF`. That field is only correct if it describes exactly the samples in
+  the file, and tools that subset samples routinely recompute `AC` and `AN`
+  while leaving `AF` untouched — a 1000 Genomes subset carried `AC=4;AN=400`
+  next to a stale `AF=0.0066`, so the true frequency was 0.01 and a `-maf 0.01`
+  run silently dropped the variant. `-use-info-af` restores the old behaviour
+  where the field is known to be trustworthy.
+- **`preprocess` scans the head of the input before it starts** and reports what
+  it found: sample count, non-biallelic records, and the fraction of calls
+  carrying `GT` and `DS`. In `auto` mode it then picks the dosage source from
+  those measurements and says which it chose and why, so a run explains its own
+  input without a separate diagnostic step.
+- **`-dosage-field` matters for VCFs that carry both `GT` and `DS`.** Some
+  exports (plink2 in particular) write the `DS` subfield for only a fraction of
+  samples while `GT` stays complete — `0|1:0.97` sitting next to a bare `0|0`.
+  Such a sample is *not* missing: its genotype is known from `GT`. The default
+  `auto` therefore fills each absent dosage from that sample's own hard call
+  rather than imputing it, and reports how many calls it filled. Treating those
+  gaps as missing and mean-imputing them attenuates every pairwise r² in
+  proportion to the `DS` presence rate. `-dosage-field GT` builds the matrix from hard calls throughout; `-dosage-field DS` keeps whatever `DS` exists and fills the rest from `GT`.
+- A genotype with **any** missing allele (`./1`) counts as missing outright; it
+  is not silently scored as a reference call.
+- Variants whose missing fraction exceeds `-max-missing` are dropped and counted.
+- Surviving missing entries are replaced with the mean of that variant's observed
+  dosages, which leaves the variant mean unchanged. Because imputed entries sit
+  exactly at the mean, σ is shrunk by `sqrt(n_observed / n)`; this is the usual
+  convention (plink does the same).
+- Allele frequency and missingness are measured on observed calls only. `INFO/AF`
+  is used as a fast pre-filter only when the whole cohort is in use — under
+  `-samples` it describes samples that are not in the matrix, so AF is recomputed
+  from the selected samples instead.
+- Variants with no variance across the selected samples are dropped, since
+  per-variant scaling would otherwise emit them as a constant dosage for every trait.
 
 **Simulation Stage:**
 1. Load trait metadata once
@@ -213,6 +272,40 @@ SAFELD separates preprocessing from simulation for scalability:
 - Stream processing for memory efficiency
 
 
+### Native .pgen / .bed support
+
+Reading plink formats directly avoids the VCF round-trip. `plink-ng` ships as a submodule, so nothing extra is needed:
+
+```bash
+git clone --recursive https://github.com/davidebolo1993/safeld
+cd safeld && mkdir build && cd build && cmake .. && make -j $(nproc)
+```
+
+If you already cloned without `--recursive`:
+
+```bash
+git submodule update --init --depth 1 external/plink-ng
+```
+
+Support switches itself on when the submodule is present and off when it is
+not, so a plain clone still builds; `-pfile`/`-bfile` then report a clear error
+and `-vcf` is unaffected. pgenlib is LGPL-3.0 and is built as a shared library so it can be replaced.
+
+### Subsetting
+
+`-extract FILE` keeps only the listed variant IDs, matching the ID column of the
+VCF or `.pvar`/`.bim` — the same semantics as plink's `--extract`:
+
+```txt
+1:113989901:A:G
+1:113990655:A:G
+```
+
+`-samples` takes either a comma-separated list or a file with one ID per line.
+Both work for every input format. If entries in the extract list match nothing,
+preprocessing says so rather than quietly keeping fewer variants than expected.
+
+
 ### Dependencies
 
 - **HTSlib**: VCF/BCF file format handling
@@ -226,9 +319,12 @@ SAFELD separates preprocessing from simulation for scalability:
 ### Input VCF Requirements
 
 - Must contain `DS` (dosage) format field or `GT` (genotype) field
-- Should include `AF` (allele frequency) in INFO field (calculated if missing)
+- Should include `AF` (allele frequency) in INFO field (calculated if missing, and
+  always recomputed from the selected samples when `-samples` is used)
 - Supports both compressed (.vcf.gz) and uncompressed (.vcf) files
 - Must be coordinate-sorted (enforced during preprocessing)
+- Must be biallelic; multiallelic records are skipped and reported. Split them
+  with `bcftools norm -m -any` to keep them
 
 ### Output VCF Structure
 

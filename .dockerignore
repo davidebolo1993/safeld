@@ -1,0 +1,26 @@
+# Docker does not read .gitignore, so keep the build context small and make sure
+# no genomic data is ever sent to the daemon or baked into a layer.
+*.vcf
+*.vcf.gz
+*.vcf.bgz
+*.bcf
+*.pgen
+*.pvar
+*.psam
+*.vcor
+*.bin
+*.log
+
+build/
+cmake-build-*/
+.git/
+.github/
+.vscode/
+.idea/
+.DS_Store
+
+test/
+test_*
+results_*
+prep_*
+sim_*

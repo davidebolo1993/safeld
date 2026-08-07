@@ -9,9 +9,19 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Compiler optimizations  
+# Optimising for the building CPU is off by default. On a cluster the login node
+# that compiles is often not the node that runs, and a binary built with
+# -march=native dies with SIGILL on any host lacking those instructions. The same
+# applies to a container image built on one machine and run on another. Turn it
+# on with -DSAFELD_NATIVE=ON when the build and run hosts are the same.
+option(SAFELD_NATIVE "Optimise for the building CPU (faster, not portable)" OFF)
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -mtune=native -DNDEBUG")
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+    if(SAFELD_NATIVE)
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native -mtune=native")
+        message(STATUS "SAFELD_NATIVE=ON: binary will only run on this CPU family")
+    endif()
     set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -Wall -Wextra -Wpedantic")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
 endif()
@@ -34,6 +44,98 @@ find_package(PkgConfig REQUIRED)
 # Find htslib
 pkg_check_modules(HTSLIB REQUIRED htslib)
 
+# pkg-config reports the library directory separately from the library name.
+# Without this the link works only when htslib happens to sit in a default
+# search path, and fails on Homebrew/Cellar or any non-standard prefix.
+if(HTSLIB_LIBRARY_DIRS)
+    link_directories(${HTSLIB_LIBRARY_DIRS})
+endif()
+
+# ---------------------------------------------------------------------------
+# Optional native .pgen support via plink-ng's pgenlib.
+#
+# pgenlib is LGPL-3.0 while safeld is MIT. Building it as a SHARED library keeps
+# the LGPL relinking requirement satisfied without affecting safeld's own
+# licence: a user can substitute their own pgenlib build. Do not switch this to
+# a static library without reading the LGPL terms first.
+#
+#   git clone --depth 1 https://github.com/chrchang/plink-ng
+#   cmake -DSAFELD_PGEN=ON -DPLINK_NG_DIR=/path/to/plink-ng ..
+# ---------------------------------------------------------------------------
+# plink-ng ships as a submodule, so `git clone --recursive` then `cmake ..` is
+# all that is needed. Point PLINK_NG_DIR elsewhere to use your own checkout.
+set(PLINK_NG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/plink-ng"
+    CACHE PATH "Path to a plink-ng checkout")
+
+# Fetch the submodule if it is registered but empty. `git clone --recursive`
+# only initialises submodules present on the branch it cloned, so cloning the
+# default branch and checking out another one afterwards leaves external/
+# empty and pgen support silently off. Doing it here means `cmake ..` works
+# whatever route the checkout arrived by.
+if(NOT EXISTS "${PLINK_NG_DIR}/2.0/include/pgenlib_read.h"
+   AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.gitmodules"
+   AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+    find_package(Git QUIET)
+    if(GIT_FOUND)
+        message(STATUS "plink-ng submodule is not checked out; fetching it")
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive --depth 1
+                    -- external/plink-ng
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            RESULT_VARIABLE SAFELD_SUBMODULE_RC
+            OUTPUT_QUIET ERROR_VARIABLE SAFELD_SUBMODULE_ERR)
+        if(NOT SAFELD_SUBMODULE_RC EQUAL 0)
+            message(WARNING
+                "Could not fetch the plink-ng submodule, so .pgen/.bed support "
+                "will be off:\n${SAFELD_SUBMODULE_ERR}")
+        endif()
+    endif()
+endif()
+
+# Default ON when the submodule is actually present, so the common case needs no
+# flags and a checkout without it still configures instead of failing.
+if(EXISTS "${PLINK_NG_DIR}/2.0/include/pgenlib_read.h")
+    set(SAFELD_PGEN_DEFAULT ON)
+else()
+    set(SAFELD_PGEN_DEFAULT OFF)
+endif()
+option(SAFELD_PGEN "Build native .pgen/.bed support (pgenlib, LGPL-3.0)" ${SAFELD_PGEN_DEFAULT})
+
+if(NOT SAFELD_PGEN AND NOT SAFELD_PGEN_DEFAULT)
+    # A warning rather than a status line: this is silently the difference
+    # between -pfile working and not, and it scrolls past unnoticed otherwise.
+    message(WARNING
+        "Native .pgen/.bed support is OFF: plink-ng was not found at ${PLINK_NG_DIR}.\n"
+        "  git submodule update --init --recursive --depth 1 external/plink-ng\n"
+        "then re-run cmake. -vcf is unaffected.")
+endif()
+
+if(SAFELD_PGEN)
+    if(NOT PLINK_NG_DIR)
+        message(FATAL_ERROR "SAFELD_PGEN=ON requires -DPLINK_NG_DIR=/path/to/plink-ng")
+    endif()
+    set(PGENLIB_INCLUDE "${PLINK_NG_DIR}/2.0/include")
+    if(NOT EXISTS "${PGENLIB_INCLUDE}/pgenlib_read.h")
+        message(FATAL_ERROR
+            "pgenlib_read.h not found under ${PGENLIB_INCLUDE}.\n"
+            "Run: git submodule update --init --depth 1 external/plink-ng")
+    endif()
+    if(NOT EXISTS "${PLINK_NG_DIR}/2.0/simde")
+        message(FATAL_ERROR "plink-ng's vendored simde/ is missing; a sparse checkout will not compile")
+    endif()
+
+    add_library(pgenlib SHARED
+        ${PGENLIB_INCLUDE}/plink2_base.cc
+        ${PGENLIB_INCLUDE}/plink2_bits.cc
+        ${PGENLIB_INCLUDE}/plink2_simd.cc
+        ${PGENLIB_INCLUDE}/pgenlib_misc.cc
+        ${PGENLIB_INCLUDE}/pgenlib_read.cc
+    )
+    target_include_directories(pgenlib PUBLIC ${PGENLIB_INCLUDE})
+    set_target_properties(pgenlib PROPERTIES CXX_STANDARD 11 POSITION_INDEPENDENT_CODE ON)
+    message(STATUS "Native .pgen support: ON (pgenlib from ${PLINK_NG_DIR}, LGPL-3.0)")
+endif()
+
 # Shared/common source files
 set(SHARED_SOURCES
     src/vcf_processor.cpp
@@ -49,7 +151,16 @@ set(SAFELD_SOURCES
     ${SHARED_SOURCES}
 )
 
+if(SAFELD_PGEN)
+    list(APPEND SAFELD_SOURCES src/pgen_reader.cpp)
+endif()
+
 add_executable(safeld ${SAFELD_SOURCES})
+
+if(SAFELD_PGEN)
+    target_link_libraries(safeld pgenlib)
+    target_compile_definitions(safeld PRIVATE SAFELD_HAVE_PGEN=1)
+endif()
 
 target_link_libraries(safeld 
     ${BLAS_LIBRARIES}
@@ -75,4 +186,6 @@ message(STATUS "HTSlib found: ${HTSLIB_FOUND}")
 message(STATUS "HTSlib version: ${HTSLIB_VERSION}")
 message(STATUS "Building executable:")
 message(STATUS "  - safeld (three-stage chunked workflow)")
+message(STATUS "Native .pgen support: ${SAFELD_PGEN}")
+message(STATUS "Tune for building CPU (SAFELD_NATIVE): ${SAFELD_NATIVE}")
 message(STATUS "============================")

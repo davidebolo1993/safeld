@@ -1,69 +1,90 @@
 # =============================================================================
-# Build Stage: Compile the application in a full Conda environment
+# Both stages share one base image on purpose.
+#
+# The previous arrangement compiled inside a conda image and ran on
+# ubuntu:22.04, hand-copying a dozen .so files across. That list had to be
+# maintained by hand whenever a dependency changed, and the glibc of the two
+# images had to agree by luck. When the builder image moved to a newer base the
+# binary began requiring GLIBC_2.38 and would not start on 22.04 at all.
+#
+# Building and running on the same distribution makes that class of failure
+# impossible, lets apt resolve the runtime dependencies instead of a hand-kept
+# list, and produces a considerably smaller image.
+#
+# safeld.yaml remains the supported way to build outside a container.
 # =============================================================================
-FROM condaforge/mambaforge:latest as builder
+ARG UBUNTU_VERSION=24.04
 
-# Set the working directory
+FROM ubuntu:${UBUNTU_VERSION} AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        pkg-config \
+        libhts-dev \
+        libopenblas-dev \
+        liblapack-dev \
+        zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
-
-# Copy environment file and create the Conda environment
-COPY safeld.yaml .
-RUN mamba env create -f safeld.yaml && \
-    mamba clean -afy
-
-# Set the shell to use the new environment for all subsequent RUN commands
-SHELL ["mamba", "run", "-n", "safeld_conda_environment", "/bin/bash", "-c"]
-
-# Copy the rest of the source code
 COPY CMakeLists.txt .
 COPY src/ ./src/
+COPY scripts/ ./scripts/
+# Present only when the repository was checked out with submodules. CMake turns
+# native .pgen/.bed support off by itself when this directory is missing, so the
+# image builds either way.
+COPY external/ ./external/
 
-# Build the application using your original CMakeLists.txt
-RUN mkdir build && cd build && \
-    cmake -DCMAKE_BUILD_TYPE=Release .. && \
-    make -j$(nproc)
+# SAFELD_NATIVE stays off: an image built on one machine must run on another.
+RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSAFELD_NATIVE=OFF \
+    && cmake --build build -j "$(nproc)" \
+    && ./build/safeld --help > /dev/null
 
 # =============================================================================
-# Final Stage: Create a minimal, portable image
+# Final image
 # =============================================================================
-FROM ubuntu:22.04 as final
+FROM ubuntu:${UBUNTU_VERSION} AS final
 
 LABEL maintainer="davide.bolognini@fht.org"
-LABEL version="0.0.1"
-LABEL description="A portable container for the safeld application."
+LABEL description="SAFE-LD: synthetic genotypes preserving LD structure"
+LABEL org.opencontainers.image.source="https://github.com/davidebolo1993/safeld"
 
-# Copy the compiled executable from the build stage
+ENV DEBIAN_FRONTEND=noninteractive
+# bcftools brings libhts3 with it, and merge shells out to bcftools for the
+# sortedness fallback. The rest are the runtime halves of what the builder
+# linked against.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        bcftools \
+        libopenblas0-pthread \
+        liblapack3 \
+        libgomp1 \
+        libstdc++6 \
+        zlib1g \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /app/build/safeld /usr/local/bin/safeld
 
-# --- Copy required shared libraries ---
-# Libraries from the Conda environment
-COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libhts.so.3 /usr/local/lib/
-COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libopenblas.so.0 /usr/local/lib/
-COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libz.so.1 /usr/local/lib/
-COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/liblzma.so.5 /usr/local/lib/
-COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libdeflate.so.0 /usr/local/lib/
-COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libgomp.so.1 /usr/local/lib/
-COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libstdc++.so.6 /usr/local/lib/
-COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libgcc_s.so.1 /usr/local/lib/
-COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libgfortran.so.5 /usr/local/lib/
+# pgenlib is built as a shared library (LGPL relinking), so it travels with the
+# binary. The wildcard keeps this working for a checkout without submodules,
+# where no such library was produced.
+COPY --from=builder /app/build/libpgenlib.s[o] /usr/local/lib/
 
-# Library from the base system of the builder
-COPY --from=builder /lib/x86_64-linux-gnu/libbz2.so.1 /usr/local/lib/
+COPY scripts/ /usr/local/share/safeld/scripts/
 
-# --- FIX: Add the missing Quad Math library required by libgfortran ---
-COPY --from=builder /opt/conda/envs/safeld_conda_environment/lib/libquadmath.so.0 /usr/local/lib/
+RUN ldconfig \
+    && chmod +x /usr/local/bin/safeld \
+    && chmod -R a+rX /usr/local/share/safeld/scripts
 
-# Update the system's dynamic linker cache to find the newly copied libraries
-RUN ldconfig
+# Fail the build rather than ship an image whose binary cannot start. This is
+# the check that caught the glibc mismatch described above; the ldd line also
+# catches a shared library that was linked but never copied in.
+RUN safeld --help > /dev/null \
+    && bcftools --version > /dev/null \
+    && ! ldd /usr/local/bin/safeld | grep 'not found'
 
-# Set the working directory for running the tool
 WORKDIR /data
-
-# Make the binary executable
-RUN chmod +x /usr/local/bin/safeld
-
-# Set the entrypoint to run the tool by default
 ENTRYPOINT ["safeld"]
-
-# Default command to run if no other arguments are provided
 CMD ["--help"]

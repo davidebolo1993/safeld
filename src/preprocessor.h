@@ -4,14 +4,30 @@
 #include <vector>
 #include <memory>
 
+#include "genotype_source.h"
+#include "vcf_processor.h"
+
+
 struct PreprocessConfig {
     std::string vcf_file;
     std::string output_dir;
     double maf_filter = 0.01;
+    // Drop variants whose fraction of missing calls exceeds this (plink --geno).
+    double max_missing_rate = 0.1;
+    // Which FORMAT field supplies dosages.
+    DosageField dosage_field = DosageField::Auto;
     int n_traits = 10;
     int chunk_size = 10000;  // variants per chunk
     int traits_per_tile = 0;  // 0 = auto (aim for ~1GB per tile)
     std::string sample_list;
+
+    // Input selection. Exactly one of vcf_file / genotype_file is used.
+    std::string genotype_file;                 // .pgen or .bed
+    std::string variants_file;                 // .pvar or .bim (optional override)
+    std::string samples_file;                  // .psam or .fam (optional override)
+    bool plink1_metadata = false;              // bed/bim/fam rather than pgen/pvar/psam
+    std::string extract_file;                  // variant ID list, one per line
+    bool use_info_af = false;                  // trust INFO/AF rather than recomputing
 };
 
 struct ChunkMetadata {
@@ -43,7 +59,8 @@ private:
     
     void createOutputDirectories();
     void generateAndSaveTraits();
-    void processAndChunkVCF();
+    void processAndChunkVCF(GenotypeSource& source);
+    std::unique_ptr<GenotypeSource> makeSource();
     void saveHeaderMetadata(const std::vector<std::string>& contig_names);
     
     void saveTraitsTiled();
