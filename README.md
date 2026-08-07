@@ -203,26 +203,6 @@ Options:
   -h, --help         Show this help message
 ```
 
-## Choosing `-ntraits`
-
-The trait count controls how precisely the synthetic data reproduces the input
-LD. Measured end to end on 403 variants x 200 samples of 1000 Genomes chr22,
-against LD computed on the real genotypes:
-
-| `-ntraits` | Pearson r | slope | RMSE |
-|-----------:|----------:|------:|-----:|
-| 200        | 0.9941    | 1.011 | 0.0220 |
-| 500        | 0.9974    | 1.005 | 0.0142 |
-| 1000       | 0.9982    | 0.996 | 0.0116 |
-| 5000       | 0.9997    | 1.001 | 0.0046 |
-| 10000      | 0.9999    | 1.000 | 0.0034 |
-
-Error falls as roughly `1 / sqrt(ntraits)`, which is what a random projection
-predicts. The slope stays at 1.0 throughout, so **the trait count adds noise,
-not bias**: a scatter that is merely scattered points at too few traits, while
-one whose slope sits below 1 is losing LD for some other reason and no trait
-count will fix it. That distinction is worth keeping in mind when a plot looks
-wrong — see the note on `INFO/AF` and on `-dosage-field` above.
 
 ## Algorithm
 
@@ -262,10 +242,7 @@ Missingness is resolved during preprocessing, before standardization:
   `auto` therefore fills each absent dosage from that sample's own hard call
   rather than imputing it, and reports how many calls it filled. Treating those
   gaps as missing and mean-imputing them attenuates every pairwise r² in
-  proportion to the `DS` presence rate — on a file with 30% `DS` coverage a true
-  r² of 0.80 reads as 0.09 — which appears as distinct lower bands against the
-  original LD. `-dosage-field GT` builds the matrix from hard calls throughout;
-  `-dosage-field DS` keeps whatever `DS` exists and fills the rest from `GT`.
+  proportion to the `DS` presence rate. `-dosage-field GT` builds the matrix from hard calls throughout; `-dosage-field DS` keeps whatever `DS` exists and fills the rest from `GT`.
 - A genotype with **any** missing allele (`./1`) counts as missing outright; it
   is not silently scored as a reference call.
 - Variants whose missing fraction exceeds `-max-missing` are dropped and counted.
@@ -297,13 +274,7 @@ Missingness is resolved during preprocessing, before standardization:
 
 ### Native .pgen / .bed support
 
-Reading plink formats directly avoids the VCF round-trip that caused real
-trouble: exporting a hard-call pgen with `--export vcf vcf-dosage=DS` writes the
-`DS` subfield for only the entries that happen to carry a dosage track, and the
-resulting VCF cannot be read correctly without knowing that. A `.pgen` records
-dosage presence explicitly per sample, so the ambiguity does not arise.
-
-plink-ng ships as a submodule, so nothing extra is needed:
+Reading plink formats directly avoids the VCF round-trip. plink-ng ships as a submodule, so nothing extra is needed:
 
 ```bash
 git clone --recursive https://github.com/davidebolo1993/safeld
@@ -337,36 +308,6 @@ VCF or `.pvar`/`.bim` — the same semantics as plink's `--extract`:
 Both work for every input format. If entries in the extract list match nothing,
 preprocessing says so rather than quietly keeping fewer variants than expected.
 
-## Tests
-
-```bash
-tests/run_tests.sh build/safeld
-```
-
-Synthetic fixtures are generated on the fly, so this needs nothing but Python.
-The central check writes the same genotypes as both a VCF and a plink1 `.bed`
-and requires the two readers to produce byte-identical standardized matrices —
-a reader bug then shows up as disagreement rather than as plausible output. The
-rest cover the input pathologies that caused real failures: ID-less records,
-duplicate loci and IDs, multiallelic sites, all-missing and monomorphic
-variants, and sparse `DS`.
-
-For the real-data checks, which need `bcftools`, `plink2` and network access:
-
-```bash
-tests/get_real_testdata.sh                 # 100 kb of 1000 Genomes chr22
-tests/run_tests.sh build/safeld tests/.work tests/realdata
-```
-
-That builds the same region as VCF, BCF, `.pgen` and `.bed` and requires all
-four to agree byte for byte. It is worth the extra step: it immediately caught a
-bug the synthetic fixtures could not, since plink2 recomputes `AC` and `AN` when
-subsetting samples but leaves `INFO/AF` at its original value, so filtering on
-`INFO/AF` silently used a frequency the data did not have. That region also has
-no rsIDs at all, which is the pathology that broke the original tool, here
-occurring in real data rather than a constructed fixture.
-
-Tests needing `.bed`/`.pgen` skip themselves when built without `SAFELD_PGEN`.
 
 ### Dependencies
 
