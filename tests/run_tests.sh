@@ -208,6 +208,48 @@ if [ -f "$REAL/real_ids.vcf" ] && [ -f "$REAL/real.vcf.gz" ]; then
   grep -q "non-biallelic" <<<"$out" && ok "real multiallelic and symbolic records skipped" \
                                     || bad "real multiallelic and symbolic records skipped"
 
+  # The claim the tool actually makes: LD computed on the synthetic output
+  # reproduces LD computed on the real genotypes. Everything else in this file
+  # checks that the inputs were read correctly, which is necessary but says
+  # nothing about whether the simulation preserves what it is supposed to.
+  if command -v plink2 >/dev/null 2>&1; then
+    E="$WORK/e2e"; mkdir -p "$E"
+    run preprocess -vcf "$REAL/real_ids.vcf" -out "$E/prep" -ntraits 2000 >/dev/null
+    run simulate   -prep "$E/prep" -out "$E/sim" -compress >/dev/null
+    run merge      -in "$E/sim" -out "$E/safeld.vcf.gz" >/dev/null
+
+    ( cd "$E" && \
+      plink2 --vcf safeld.vcf.gz dosage=DS --make-pgen --out SAFELD >/dev/null 2>&1 && \
+      plink2 --pfile SAFELD --r2-unphased --ld-window-kb 1000 --ld-window-r2 0 \
+             --out SAFELD >/dev/null 2>&1 && \
+      plink2 --pfile "$REAL/real_ids" --r2-unphased --ld-window-kb 1000 --ld-window-r2 0 \
+             --out ORIGINAL >/dev/null 2>&1 )
+
+    if [ -s "$E/ORIGINAL.vcor" ] && [ -s "$E/SAFELD.vcor" ]; then
+      corr=$(awk -f "$HERE/../scripts/ld_cor.awk" "$E/ORIGINAL.vcor" "$E/SAFELD.vcor" 2>/dev/null)
+      r=$(grep -oE 'Pearson r  *: [0-9.]+' <<<"$corr" | grep -oE '[0-9.]+$')
+      slope=$(grep -oE 'slope \(y~0\+x\) *: [0-9.]+' <<<"$corr" | grep -oE '[0-9.]+$')
+      # 2000 traits gives r about 0.998 here; the threshold leaves room for the
+      # random trait matrix without admitting a real regression.
+      if awk -v r="${r:-0}" 'BEGIN{exit !(r > 0.995)}'; then
+        ok "simulated LD reproduces original LD (r=$r, slope=$slope, 2000 traits)"
+      else
+        bad "simulated LD reproduces original LD" "r=${r:-none}, slope=${slope:-none}"
+      fi
+      # A slope well below 1 means LD is being lost systematically, which is a
+      # different failure from noise and needs saying separately.
+      if awk -v s="${slope:-0}" 'BEGIN{exit !(s > 0.97 && s < 1.03)}'; then
+        ok "no systematic attenuation (slope $slope within 3% of 1)"
+      else
+        bad "no systematic attenuation" "slope=${slope:-none}"
+      fi
+    else
+      bad "plink2 produced LD matrices for the end-to-end check"
+    fi
+  else
+    skip "end-to-end LD correlation (plink2 not in PATH)"
+  fi
+
   if [ "$HAVE_PGEN" = "1" ]; then
     a=$(run preprocess -pfile "$REAL/real_ids" -out "$WORK/r_ex_p" -ntraits 5 \
             -extract "$REAL/extract_ids.txt" -samples "$REAL/subset_samples.txt")

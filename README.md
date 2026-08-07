@@ -203,6 +203,27 @@ Options:
   -h, --help         Show this help message
 ```
 
+## Choosing `-ntraits`
+
+The trait count controls how precisely the synthetic data reproduces the input
+LD. Measured end to end on 403 variants x 200 samples of 1000 Genomes chr22,
+against LD computed on the real genotypes:
+
+| `-ntraits` | Pearson r | slope | RMSE |
+|-----------:|----------:|------:|-----:|
+| 200        | 0.9941    | 1.011 | 0.0220 |
+| 500        | 0.9974    | 1.005 | 0.0142 |
+| 1000       | 0.9982    | 0.996 | 0.0116 |
+| 5000       | 0.9997    | 1.001 | 0.0046 |
+| 10000      | 0.9999    | 1.000 | 0.0034 |
+
+Error falls as roughly `1 / sqrt(ntraits)`, which is what a random projection
+predicts. The slope stays at 1.0 throughout, so **the trait count adds noise,
+not bias**: a scatter that is merely scattered points at too few traits, while
+one whose slope sits below 1 is losing LD for some other reason and no trait
+count will fix it. That distinction is worth keeping in mind when a plot looks
+wrong — see the note on `INFO/AF` and on `-dosage-field` above.
+
 ## Algorithm
 
 SAFELD separates preprocessing from simulation for scalability:
